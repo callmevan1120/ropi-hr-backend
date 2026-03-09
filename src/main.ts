@@ -1,6 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { json, urlencoded } from 'express'; // <-- REVISI: Tambahkan urlencoded
+import { json, urlencoded } from 'express';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -8,15 +8,18 @@ async function bootstrap() {
   // Aktifkan CORS biar PWA bisa komunikasi dengan backend ini
   app.enableCors({
     origin: '*',  // izinkan semua origin saat development
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', // Tambahan aman buat Vercel
+    credentials: true,
   }); 
 
-  // <-- REVISI WAJIB: Perbesar limit ke 50mb (karena Base64 bikin ukuran file bengkak)
+  // Perbesar limit ke 50mb (karena Base64 bikin ukuran file bengkak)
   app.use(json({ limit: '50mb' })); 
-  app.use(urlencoded({ extended: true, limit: '50mb' })); // <-- Tambahan wajib
+  app.use(urlencoded({ extended: true, limit: '50mb' }));
   
-  // Paksa jalan di port 3333
-  await app.listen(3333);
-  console.log(`🚀 Backend RopiHR berhasil jalan di Port 3333`);
+  // REVISI WAJIB VERCEL: Jangan paksa 3333, biarkan Vercel yang atur port-nya
+  const port = process.env.PORT || 3333;
+  await app.listen(port);
+  console.log(`🚀 Backend RopiHR berhasil jalan di Port ${port}`);
 }
 
 bootstrap();
