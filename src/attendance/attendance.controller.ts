@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Get, Query } from '@nestjs/common';
+import { Controller, Post, Body, Get, Query, Res, HttpStatus } from '@nestjs/common';
 import { AttendanceService } from './attendance.service';
 
 @Controller('api/attendance')
@@ -38,5 +38,22 @@ export class AttendanceController {
   @Get('leave-history')
   async getLeaveHistory(@Query('employee_id') employeeId: string) {
     return this.attendanceService.getLeaveHistory(employeeId);
+  }
+
+  // ✨ PROXY FILE — hindari Mixed Content HTTPS vs HTTP ✨
+  // Frontend request: GET /api/attendance/file?path=/files/Bukti_xxx.jpg
+  @Get('file')
+  async getFile(@Query('path') filePath: string, @Res() res: any) {
+    try {
+      if (!filePath || !filePath.startsWith('/files/')) {
+        return res.status(400).json({ error: 'Invalid file path' });
+      }
+      const { buffer, contentType } = await this.attendanceService.proxyFile(filePath);
+      res.set('Content-Type', contentType);
+      res.set('Cache-Control', 'public, max-age=86400');
+      res.send(buffer);
+    } catch (err) {
+      res.status(404).json({ error: 'File not found' });
+    }
   }
 }

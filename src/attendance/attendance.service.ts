@@ -156,6 +156,26 @@ export class AttendanceService {
   }
 
   // ══════════════════════════════════════════════════
+  // ✨ PROXY FILE — hindari Mixed Content HTTPS vs HTTP ✨
+  // ══════════════════════════════════════════════════
+  async proxyFile(filePath: string): Promise<{ buffer: Buffer; contentType: string }> {
+    const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
+    const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
+    const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
+
+    const url = `${erpUrl}${filePath}`;
+    const response = await firstValueFrom(
+      this.httpService.get(url, {
+        headers: { Authorization: `token ${apiKey}:${apiSecret}` },
+        responseType: 'arraybuffer',
+      })
+    );
+
+    const contentType = response.headers['content-type'] || 'image/jpeg';
+    return { buffer: Buffer.from(response.data), contentType };
+  }
+
+  // ══════════════════════════════════════════════════
   // ✨ RIWAYAT IZIN — dengan attachment dari File doctype ✨
   // ══════════════════════════════════════════════════
   async getLeaveHistory(employeeId: string) {
