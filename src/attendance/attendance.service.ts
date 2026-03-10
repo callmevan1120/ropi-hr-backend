@@ -156,17 +156,19 @@ export class AttendanceService {
   }
 
   // ══════════════════════════════════════════════════
-  // ✨ RIWAYAT IZIN ✨
+  // ✨ RIWAYAT IZIN — dengan attachment dari File doctype ✨
   // ══════════════════════════════════════════════════
   async getLeaveHistory(employeeId: string) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
+    const authHeader = `token ${apiKey}:${apiSecret}`;
 
     try {
-      const response = await firstValueFrom(
+      // STEP 1: Ambil daftar Leave Application
+      const leaveRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Leave Application`, {
-          headers: { Authorization: `token ${apiKey}:${apiSecret}` },
+          headers: { Authorization: authHeader },
           params: {
             filters: JSON.stringify([
               ['employee', '=', employeeId],
@@ -185,8 +187,50 @@ export class AttendanceService {
           },
         })
       );
-      return { success: true, data: response.data.data };
-    } catch (error) {
+
+      const leaveList: any[] = leaveRes.data.data;
+
+      if (!leaveList || leaveList.length === 0) {
+        return { success: true, data: [] };
+      }
+
+      // STEP 2: Ambil semua attachment dari doctype File
+      // ERPNext menyimpan attachment di File doctype dengan attached_to_doctype & attached_to_name
+      const docNames = leaveList.map((l) => l.name);
+
+      const fileRes = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/File`, {
+          headers: { Authorization: authHeader },
+          params: {
+            filters: JSON.stringify([
+              ['attached_to_doctype', '=', 'Leave Application'],
+              ['attached_to_name', 'in', docNames],
+            ]),
+            fields: JSON.stringify(['name', 'file_url', 'attached_to_name']),
+            limit_page_length: 200,
+          },
+        })
+      );
+
+      // Buat map: docName → file_url (ambil file pertama per dokumen)
+      const attachmentMap: Record<string, string> = {};
+      const fileList: any[] = fileRes.data.data ?? [];
+      for (const file of fileList) {
+        // Kalau satu doc punya beberapa file, ambil yang pertama saja
+        if (!attachmentMap[file.attached_to_name]) {
+          attachmentMap[file.attached_to_name] = file.file_url;
+        }
+      }
+
+      // STEP 3: Gabungkan attachment ke masing-masing leave record
+      const result = leaveList.map((leave) => ({
+        ...leave,
+        attachment: attachmentMap[leave.name] ?? null,
+      }));
+
+      return { success: true, data: result };
+    } catch (error: any) {
+      console.error('getLeaveHistory error:', error.response?.data || error.message);
       throw new HttpException('Gagal mengambil riwayat izin dari ERPNext.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
