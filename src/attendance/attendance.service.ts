@@ -26,10 +26,14 @@ export class AttendanceService {
     private readonly configService: ConfigService,
   ) {}
 
+  // ══════════════════════════════════════════════════
+  // ✨ LOGIKA FINAL: ABSEN MASUK/KELUAR + UPLOAD GAMBAR FISIK ✨
+  // ══════════════════════════════════════════════════
   async createCheckin(data: any) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
+    const authHeader = `token ${apiKey}:${apiSecret}`;
 
     try {
       const now = new Date();
@@ -55,13 +59,13 @@ export class AttendanceService {
         finalShift = `Senin - Kamis (${branchLabel} ${periodeLabel})`;
       }
 
+      // ── STEP 1: Buat Dokumen Checkin Dulu (TANPA FOTO BASE64) ──
       const payload = {
         employee: data.employee_id,
         log_type: logType,
         time: timeString,
         latitude: data.latitude,
         longitude: data.longitude,
-        custom_foto_absen: data.image_verification,
         shift: finalShift,
         device_id: 'Vite-React-App',
       };
@@ -69,11 +73,96 @@ export class AttendanceService {
       const response = await firstValueFrom(
         this.httpService.post(`${erpUrl}/api/resource/Employee Checkin`, payload, {
           headers: {
-            'Authorization': `token ${apiKey}:${apiSecret}`,
+            'Authorization': authHeader,
             'Content-Type': 'application/json',
           },
         })
       );
+
+      const docName = response.data.data.name;
+
+      // ── STEP 2: Jika ada foto Base64, jadikan File Fisik lalu Upload ke ERPNext ──
+      if (docName && data.image_verification) {
+        try {
+          const matches = data.image_verification.match(
+            /^data:([A-Za-z0-9+\/]+\/[A-Za-z0-9+\/]+);base64,(.+)$/,
+          );
+
+          if (matches) {
+            const mimeType = matches[1];
+            const pureBase64 = matches[2];
+            const fileBuffer = Buffer.from(pureBase64, 'base64');
+            
+            const extMap: Record<string, string> = {
+              'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png',
+              'image/gif': 'gif', 'image/webp': 'webp',
+            };
+            const ext = extMap[mimeType] ?? 'jpg';
+            const safeFileName = `Absen_${data.employee_id}_${Date.now()}.${ext}`;
+
+            const boundary = `----FormBoundary${Date.now()}`;
+
+            const beforeFile = [
+              `--${boundary}`,
+              `Content-Disposition: form-data; name="file"; filename="${safeFileName}"`,
+              `Content-Type: ${mimeType}`,
+              '',
+              '',
+            ].join('\r\n');
+
+            const afterFile = [
+              '',
+              `--${boundary}`,
+              `Content-Disposition: form-data; name="is_private"`,
+              '',
+              '0', // 0 agar gambar bisa diakses/dilihat HRD
+              `--${boundary}`,
+              `Content-Disposition: form-data; name="doctype"`,
+              '',
+              'Employee Checkin',
+              `--${boundary}`,
+              `Content-Disposition: form-data; name="docname"`,
+              '',
+              docName,
+              `--${boundary}`,
+              `Content-Disposition: form-data; name="fieldname"`, // Menyuruh ERPNext taruh URL di field ini
+              '',
+              'custom_foto_absen',
+              `--${boundary}--`,
+              '',
+            ].join('\r\n');
+
+            const bodyBuffer = Buffer.concat([
+              Buffer.from(beforeFile, 'utf-8'),
+              fileBuffer,
+              Buffer.from(afterFile, 'utf-8'),
+            ]);
+
+            // Eksekusi tembak API ke ERPNext
+            const uploadRes = await firstValueFrom(
+              this.httpService.post(
+                `${erpUrl}/api/method/upload_file`,
+                bodyBuffer,
+                {
+                  headers: {
+                    Authorization: authHeader,
+                    'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                    'Content-Length': bodyBuffer.length.toString(),
+                  },
+                  maxBodyLength: Infinity,
+                  maxContentLength: Infinity,
+                },
+              ),
+            );
+
+            // Sisipkan URL hasil upload agar dikembalikan ke Frontend
+            response.data.data.custom_foto_absen = uploadRes.data.message.file_url;
+            console.log(`[✅ Upload OK] Foto absen fisik tersimpan: ${uploadRes.data.message.file_url}`);
+          }
+        } catch (fileErr: any) {
+          console.error('[⚠️ Upload Gagal] Absen masuk, tapi foto gagal jadi file:', fileErr.response?.data || fileErr.message);
+        }
+      }
 
       return {
         success: true,
@@ -215,7 +304,6 @@ export class AttendanceService {
       }
 
       // STEP 2: Ambil semua attachment dari doctype File
-      // ERPNext menyimpan attachment di File doctype dengan attached_to_doctype & attached_to_name
       const docNames = leaveList.map((l) => l.name);
 
       const fileRes = await firstValueFrom(
@@ -232,11 +320,9 @@ export class AttendanceService {
         })
       );
 
-      // Buat map: docName → file_url (ambil file pertama per dokumen)
       const attachmentMap: Record<string, string> = {};
       const fileList: any[] = fileRes.data.data ?? [];
       for (const file of fileList) {
-        // Kalau satu doc punya beberapa file, ambil yang pertama saja
         if (!attachmentMap[file.attached_to_name]) {
           attachmentMap[file.attached_to_name] = file.file_url;
         }
@@ -360,7 +446,7 @@ export class AttendanceService {
                 headers: {
                   Authorization: authHeader,
                   'Content-Type': `multipart/form-data; boundary=${boundary}`,
-                  'Content-Length': bodyBuffer.length,
+                  'Content-Length': bodyBuffer.length.toString(),
                 },
                 maxBodyLength: Infinity,
                 maxContentLength: Infinity,
