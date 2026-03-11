@@ -27,27 +27,28 @@ export class AttendanceService {
   ) {}
 
   // ══════════════════════════════════════════════════
-  // ✨ LOGIKA FINAL: ABSEN MASUK/KELUAR + UPLOAD GAMBAR FISIK ✨
+  // ✨ LOGIKA FINAL: ABSEN DENGAN BASE64 & FIX ZONA WAKTU (WIB) ✨
   // ══════════════════════════════════════════════════
   async createCheckin(data: any) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
-    const authHeader = `token ${apiKey}:${apiSecret}`;
 
     try {
-      const now = new Date();
-      const timeString = new Date(now.getTime() - (now.getTimezoneOffset() * 60000))
-        .toISOString().slice(0, 19).replace('T', ' ');
+      // 🔥 FIX JAM: Paksa server Vercel (UTC) untuk tambah 7 jam menjadi WIB
+      const nowUtc = new Date();
+      const wibTime = new Date(nowUtc.getTime() + (7 * 60 * 60 * 1000));
+      // Hasilnya presisi WIB: "2026-03-11 11:50:00"
+      const timeString = wibTime.toISOString().replace('T', ' ').substring(0, 19);
 
       const inputTipe = (data.tipe || data.log_type || '').toUpperCase();
       const logType = (inputTipe === 'KELUAR' || inputTipe === 'OUT') ? 'OUT' : 'IN';
 
       let finalShift = data.shift;
       const branch = data.branch || 'PH Klaten';
-      const day = now.getDay();
+      const day = wibTime.getDay(); // Pakai hari WIB juga biar shiftnya akurat
 
-      const isRamadhan = checkIsRamadhan(now);
+      const isRamadhan = checkIsRamadhan(wibTime);
       const branchLabel = branch.includes('Jakarta') ? 'Jakarta' : 'PH Klaten';
       const periodeLabel = isRamadhan ? 'Ramadhan' : 'Non Ramadhan';
 
@@ -59,13 +60,14 @@ export class AttendanceService {
         finalShift = `Senin - Kamis (${branchLabel} ${periodeLabel})`;
       }
 
-      // ── STEP 1: Buat Dokumen Checkin Dulu (TANPA FOTO BASE64) ──
+      // 🔥 FIX FOTO: Kembali menggunakan Base64 langsung tanpa convert ke file fisik
       const payload = {
         employee: data.employee_id,
         log_type: logType,
         time: timeString,
         latitude: data.latitude,
         longitude: data.longitude,
+        custom_foto_absen: data.image_verification, // <-- Simpan Base64 murni ke ERPNext
         shift: finalShift,
         device_id: 'Vite-React-App',
       };
@@ -73,96 +75,11 @@ export class AttendanceService {
       const response = await firstValueFrom(
         this.httpService.post(`${erpUrl}/api/resource/Employee Checkin`, payload, {
           headers: {
-            'Authorization': authHeader,
+            'Authorization': `token ${apiKey}:${apiSecret}`,
             'Content-Type': 'application/json',
           },
         })
       );
-
-      const docName = response.data.data.name;
-
-      // ── STEP 2: Jika ada foto Base64, jadikan File Fisik lalu Upload ke ERPNext ──
-      if (docName && data.image_verification) {
-        try {
-          const matches = data.image_verification.match(
-            /^data:([A-Za-z0-9+\/]+\/[A-Za-z0-9+\/]+);base64,(.+)$/,
-          );
-
-          if (matches) {
-            const mimeType = matches[1];
-            const pureBase64 = matches[2];
-            const fileBuffer = Buffer.from(pureBase64, 'base64');
-            
-            const extMap: Record<string, string> = {
-              'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png',
-              'image/gif': 'gif', 'image/webp': 'webp',
-            };
-            const ext = extMap[mimeType] ?? 'jpg';
-            const safeFileName = `Absen_${data.employee_id}_${Date.now()}.${ext}`;
-
-            const boundary = `----FormBoundary${Date.now()}`;
-
-            const beforeFile = [
-              `--${boundary}`,
-              `Content-Disposition: form-data; name="file"; filename="${safeFileName}"`,
-              `Content-Type: ${mimeType}`,
-              '',
-              '',
-            ].join('\r\n');
-
-            const afterFile = [
-              '',
-              `--${boundary}`,
-              `Content-Disposition: form-data; name="is_private"`,
-              '',
-              '0', // 0 agar gambar bisa diakses/dilihat HRD
-              `--${boundary}`,
-              `Content-Disposition: form-data; name="doctype"`,
-              '',
-              'Employee Checkin',
-              `--${boundary}`,
-              `Content-Disposition: form-data; name="docname"`,
-              '',
-              docName,
-              `--${boundary}`,
-              `Content-Disposition: form-data; name="fieldname"`, // Menyuruh ERPNext taruh URL di field ini
-              '',
-              'custom_foto_absen',
-              `--${boundary}--`,
-              '',
-            ].join('\r\n');
-
-            const bodyBuffer = Buffer.concat([
-              Buffer.from(beforeFile, 'utf-8'),
-              fileBuffer,
-              Buffer.from(afterFile, 'utf-8'),
-            ]);
-
-            // Eksekusi tembak API ke ERPNext
-            const uploadRes = await firstValueFrom(
-              this.httpService.post(
-                `${erpUrl}/api/method/upload_file`,
-                bodyBuffer,
-                {
-                  headers: {
-                    Authorization: authHeader,
-                    'Content-Type': `multipart/form-data; boundary=${boundary}`,
-                    'Content-Length': bodyBuffer.length.toString(),
-                  },
-                  maxBodyLength: Infinity,
-                  maxContentLength: Infinity,
-                },
-              ),
-            );
-
-            // Sisipkan URL hasil upload agar dikembalikan ke Frontend
-            response.data.data.custom_foto_absen = uploadRes.data.message.file_url;
-            console.log(`[✅ Upload OK] Foto absen fisik tersimpan: ${uploadRes.data.message.file_url}`);
-          }
-        } catch (fileErr: any) {
-          console.error('[⚠️ Upload Gagal] Absen masuk, tapi foto gagal jadi file:', fileErr.response?.data || fileErr.message);
-        }
-      }
 
       return {
         success: true,
@@ -244,9 +161,6 @@ export class AttendanceService {
     }
   }
 
-  // ══════════════════════════════════════════════════
-  // ✨ PROXY FILE — hindari Mixed Content HTTPS vs HTTP ✨
-  // ══════════════════════════════════════════════════
   async proxyFile(filePath: string): Promise<{ buffer: Buffer; contentType: string }> {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
@@ -264,9 +178,6 @@ export class AttendanceService {
     return { buffer: Buffer.from(response.data), contentType };
   }
 
-  // ══════════════════════════════════════════════════
-  // ✨ RIWAYAT IZIN — dengan attachment dari File doctype ✨
-  // ══════════════════════════════════════════════════
   async getLeaveHistory(employeeId: string) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
@@ -274,7 +185,6 @@ export class AttendanceService {
     const authHeader = `token ${apiKey}:${apiSecret}`;
 
     try {
-      // STEP 1: Ambil daftar Leave Application
       const leaveRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Leave Application`, {
           headers: { Authorization: authHeader },
@@ -303,7 +213,6 @@ export class AttendanceService {
         return { success: true, data: [] };
       }
 
-      // STEP 2: Ambil semua attachment dari doctype File
       const docNames = leaveList.map((l) => l.name);
 
       const fileRes = await firstValueFrom(
@@ -328,7 +237,6 @@ export class AttendanceService {
         }
       }
 
-      // STEP 3: Gabungkan attachment ke masing-masing leave record
       const result = leaveList.map((leave) => ({
         ...leave,
         attachment: attachmentMap[leave.name] ?? null,
@@ -341,9 +249,6 @@ export class AttendanceService {
     }
   }
 
-  // ══════════════════════════════════════════════════
-  // ✨ LOGIKA FINAL: IZIN DENGAN UPLOAD FOTO ✨
-  // ══════════════════════════════════════════════════
   async submitLeaveRequest(data: any) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
@@ -351,7 +256,6 @@ export class AttendanceService {
     const authHeader = `token ${apiKey}:${apiSecret}`;
 
     try {
-      // ── STEP 1: Buat Leave Application dulu ──
       const payload = {
         employee: data.employee_id,
         leave_type: data.leave_type,
@@ -378,7 +282,6 @@ export class AttendanceService {
 
       const docName = response.data.data.name;
 
-      // ── STEP 2: Upload foto pakai multipart/form-data ke /api/method/upload_file ──
       if (docName && data.attachment) {
         try {
           const matches = data.attachment.match(
@@ -446,7 +349,7 @@ export class AttendanceService {
                 headers: {
                   Authorization: authHeader,
                   'Content-Type': `multipart/form-data; boundary=${boundary}`,
-                  'Content-Length': bodyBuffer.length.toString(),
+                  'Content-Length': bodyBuffer.length,
                 },
                 maxBodyLength: Infinity,
                 maxContentLength: Infinity,
