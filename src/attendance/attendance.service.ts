@@ -26,9 +26,6 @@ export class AttendanceService {
     private readonly configService: ConfigService,
   ) {}
 
-  // ══════════════════════════════════════════════════
-  // ✨ LOGIKA FINAL: ABSEN DENGAN BASE64 & FIX ZONA WAKTU (WIB) ✨
-  // ══════════════════════════════════════════════════
   async createCheckin(data: any) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
@@ -60,14 +57,15 @@ export class AttendanceService {
         finalShift = `Senin - Kamis (${branchLabel} ${periodeLabel})`;
       }
 
-      // 🔥 FIX FOTO: Kembali menggunakan Base64 langsung tanpa convert ke file fisik
+      // 🔥 FIX FOTO: Kirim 2 Foto Base64 (Selfie & Mesin) langsung ke ERPNext
       const payload = {
         employee: data.employee_id,
         log_type: logType,
         time: timeString,
         latitude: data.latitude,
         longitude: data.longitude,
-        custom_foto_absen: data.image_verification, // <-- Simpan Base64 murni ke ERPNext
+        custom_foto_absen: data.image_verification,     // Foto 1: Muka/Selfie
+        custom_validasi_foto: data.validasi_foto,       // Foto 2: Bukti Mesin Fingerprint
         shift: finalShift,
         device_id: 'Vite-React-App',
       };
@@ -107,7 +105,11 @@ export class AttendanceService {
               ['time', '>=', `${from} 00:00:00`],
               ['time', '<=', `${to} 23:59:59`],
             ]),
-            fields: JSON.stringify(['name', 'employee', 'log_type', 'time', 'custom_foto_absen', 'shift']),
+            // 🔥 UPDATE: Tambahkan field custom_validasi_foto di getHistory
+            fields: JSON.stringify([
+              'name', 'employee', 'log_type', 'time', 
+              'custom_foto_absen', 'custom_validasi_foto', 'shift'
+            ]),
             order_by: 'time desc',
             limit_page_length: 100,
           },
@@ -161,6 +163,9 @@ export class AttendanceService {
     }
   }
 
+  // ══════════════════════════════════════════════════
+  // ✨ PROXY FILE — hindari Mixed Content HTTPS vs HTTP ✨
+  // ══════════════════════════════════════════════════
   async proxyFile(filePath: string): Promise<{ buffer: Buffer; contentType: string }> {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
@@ -178,6 +183,9 @@ export class AttendanceService {
     return { buffer: Buffer.from(response.data), contentType };
   }
 
+  // ══════════════════════════════════════════════════
+  // ✨ RIWAYAT IZIN — dengan attachment dari File doctype ✨
+  // ══════════════════════════════════════════════════
   async getLeaveHistory(employeeId: string) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
@@ -185,6 +193,7 @@ export class AttendanceService {
     const authHeader = `token ${apiKey}:${apiSecret}`;
 
     try {
+      // STEP 1: Ambil daftar Leave Application
       const leaveRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Leave Application`, {
           headers: { Authorization: authHeader },
@@ -213,6 +222,7 @@ export class AttendanceService {
         return { success: true, data: [] };
       }
 
+      // STEP 2: Ambil semua attachment dari doctype File
       const docNames = leaveList.map((l) => l.name);
 
       const fileRes = await firstValueFrom(
@@ -237,6 +247,7 @@ export class AttendanceService {
         }
       }
 
+      // STEP 3: Gabungkan attachment ke masing-masing leave record
       const result = leaveList.map((leave) => ({
         ...leave,
         attachment: attachmentMap[leave.name] ?? null,
@@ -249,6 +260,9 @@ export class AttendanceService {
     }
   }
 
+  // ══════════════════════════════════════════════════
+  // ✨ LOGIKA FINAL: IZIN DENGAN UPLOAD FOTO ✨
+  // ══════════════════════════════════════════════════
   async submitLeaveRequest(data: any) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
@@ -256,6 +270,7 @@ export class AttendanceService {
     const authHeader = `token ${apiKey}:${apiSecret}`;
 
     try {
+      // ── STEP 1: Buat Leave Application dulu ──
       const payload = {
         employee: data.employee_id,
         leave_type: data.leave_type,
@@ -282,6 +297,7 @@ export class AttendanceService {
 
       const docName = response.data.data.name;
 
+      // ── STEP 2: Upload foto izin pakai multipart/form-data (Biarkan ini tetap file fisik, tidak perlu diubah) ──
       if (docName && data.attachment) {
         try {
           const matches = data.attachment.match(

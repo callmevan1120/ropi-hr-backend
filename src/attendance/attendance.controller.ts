@@ -34,14 +34,13 @@ export class AttendanceController {
     return this.attendanceService.submitLeaveRequest(body);
   }
 
-  // ✨ ENDPOINT RIWAYAT IZIN ✨
+  // ENDPOINT RIWAYAT IZIN 
   @Get('leave-history')
   async getLeaveHistory(@Query('employee_id') employeeId: string) {
     return this.attendanceService.getLeaveHistory(employeeId);
   }
 
-  // ✨ PROXY FILE — hindari Mixed Content HTTPS vs HTTP ✨
-  // Frontend request: GET /api/attendance/file?path=/files/Bukti_xxx.jpg
+  // PROXY FILE — hindari Mixed Content HTTPS vs HTTP 
   @Get('file')
   async getFile(@Query('path') filePath: string, @Res() res: any) {
     try {
