@@ -56,7 +56,7 @@ export class AttendanceService {
         finalShift = `Senin - Kamis (${branchLabel} ${periodeLabel})`;
       }
 
-      // 🔥 UPDATE NAMA FIELD: custom_verification_image
+      // 🔥 UPDATE: TAMBAH FIELD TANDA TANGAN (custom_signature)
       const payload = {
         employee: data.employee_id,
         log_type: logType,
@@ -65,6 +65,7 @@ export class AttendanceService {
         longitude: data.longitude,
         custom_foto_absen: data.image_verification,
         custom_verification_image: data.custom_verification_image, 
+        custom_signature: data.custom_signature, // 🔥 BARIS BARU UNTUK TTD
         shift: finalShift,
         device_id: 'Vite-React-App',
       };
@@ -104,10 +105,10 @@ export class AttendanceService {
               ['time', '>=', `${from} 00:00:00`],
               ['time', '<=', `${to} 23:59:59`],
             ]),
-            // 🔥 UPDATE NAMA FIELD: custom_verification_image
+            // 🔥 UPDATE: AMBIL FIELD TTD DARI ERPNEXT (custom_signature)
             fields: JSON.stringify([
               'name', 'employee', 'log_type', 'time', 
-              'custom_foto_absen', 'custom_verification_image', 'shift'
+              'custom_foto_absen', 'custom_verification_image', 'custom_signature', 'shift'
             ]),
             order_by: 'time desc',
             limit_page_length: 100,
