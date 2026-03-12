@@ -120,8 +120,8 @@ export class AttendanceService {
     }
   }
 
-  // FUNGSI BARU KHUSUS HR DASHBOARD
-  async getAllHistory(date: string) {
+  // 🔥 FUNGSI REVISI KHUSUS HR DASHBOARD (RANGE TANGGAL) 🔥
+  async getAllHistory(from: string, to: string) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
@@ -132,8 +132,8 @@ export class AttendanceService {
           headers: { Authorization: `token ${apiKey}:${apiSecret}` },
           params: {
             filters: JSON.stringify([
-              ['time', '>=', `${date} 00:00:00`],
-              ['time', '<=', `${date} 23:59:59`],
+              ['time', '>=', `${from} 00:00:00`],
+              ['time', '<=', `${to} 23:59:59`],
             ]),
             // UPDATE: Masukkan latitude dan longitude untuk Fitur G-Maps HR!
             fields: JSON.stringify([
@@ -142,7 +142,7 @@ export class AttendanceService {
               'latitude', 'longitude' 
             ]),
             order_by: 'time desc',
-            limit_page_length: 1000, 
+            limit_page_length: 5000, // Diperbesar supaya muat 1 bulan
           },
         })
       );

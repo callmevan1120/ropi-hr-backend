@@ -19,10 +19,13 @@ export class AttendanceController {
     return this.attendanceService.getHistory(employee_id, from, to);
   }
 
-  // ENDPOINT BARU KHUSUS HR DASHBOARD
-  @Get('all-today')
-  async getAllHistory(@Query('date') date: string) {
-    return this.attendanceService.getAllHistory(date);
+  // 🔥 ENDPOINT BARU KHUSUS HR DASHBOARD (BISA FILTER HARIAN & BULANAN) 🔥
+  @Get('all-history')
+  async getAllHistory(
+    @Query('from') from: string,
+    @Query('to') to: string
+  ) {
+    return this.attendanceService.getAllHistory(from, to);
   }
 
   @Get('shifts')
