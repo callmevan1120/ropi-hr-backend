@@ -1,9 +1,6 @@
 import { Controller, Post, Get, Body, Param, HttpException, HttpStatus } from '@nestjs/common';
 import { AuthService } from './auth.service';
 
-// =============================================
-// Helper: hitung jarak GPS (meter) — Haversine
-// =============================================
 function hitungJarak(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371000;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -22,11 +19,12 @@ export class AuthController {
   // ─── POST /api/auth/login ───────────────────
   @Post('auth/login')
   async login(@Body() body: any) {
-    return this.authService.login(body.email, body.password);
+    // Tangkap data berdasar ID karyawan atau email. Karena frontend mengirim employeeId.
+    const identifier = body.employeeId || body.email;
+    return this.authService.login(identifier, body.password);
   }
 
   // ─── GET /api/locations/:branch ─────────────
-  // REVISI: Sekarang async karena nembak ke ERPNext
   @Get('locations/:branch')
   async getLokasiByBranch(@Param('branch') branch: string) {
     const lokasi = await this.authService.getLokasi(branch);
@@ -38,7 +36,6 @@ export class AuthController {
   async checkin(@Body() body: any) {
     const { employee_id, tipe, latitude, longitude, branch } = body;
 
-    // 1. Validasi input
     if (!employee_id || !tipe || latitude === undefined || longitude === undefined || !branch) {
       throw new HttpException(
         'Data tidak lengkap. Butuh: employee_id, tipe, latitude, longitude, dan branch',
@@ -46,7 +43,6 @@ export class AuthController {
       );
     }
 
-    // 2. Ambil koordinat dari ERPNext (WAJIB pakai await!)
     const lokasiKantor = await this.authService.getLokasi(branch);
 
     if (!lokasiKantor || lokasiKantor.length === 0) {
@@ -56,7 +52,6 @@ export class AuthController {
       );
     }
 
-    // 3. Cek apakah karyawan berada dalam radius yang valid
     let lokasiValid = false;
     let lokasiTerdekat = { nama: '', jarak: Infinity, radius: 0 };
 
@@ -80,7 +75,6 @@ export class AuthController {
       );
     }
 
-    // 4. Kirim ke ERPNext 
     return this.authService.absen(employee_id, tipe, latitude, longitude, branch);
   }
 }

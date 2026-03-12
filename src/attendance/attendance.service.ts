@@ -105,7 +105,6 @@ export class AttendanceService {
               ['time', '>=', `${from} 00:00:00`],
               ['time', '<=', `${to} 23:59:59`],
             ]),
-            // 🔥 UPDATE: AMBIL FIELD TTD DARI ERPNEXT (custom_signature)
             fields: JSON.stringify([
               'name', 'employee', 'log_type', 'time', 
               'custom_foto_absen', 'custom_verification_image', 'custom_signature', 'shift'
@@ -118,6 +117,38 @@ export class AttendanceService {
       return { success: true, data: response.data.data };
     } catch (error) {
       throw new HttpException('Gagal mengambil riwayat absen dari ERPNext.', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  // 🔥 FUNGSI BARU KHUSUS HR DASHBOARD 🔥
+  async getAllHistory(date: string) {
+    const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
+    const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
+    const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
+
+    try {
+      const response = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Employee Checkin`, {
+          headers: { Authorization: `token ${apiKey}:${apiSecret}` },
+          params: {
+            filters: JSON.stringify([
+              ['time', '>=', `${date} 00:00:00`],
+              ['time', '<=', `${date} 23:59:59`],
+            ]),
+            // UPDATE: Masukkan latitude dan longitude untuk Fitur G-Maps HR!
+            fields: JSON.stringify([
+              'name', 'employee', 'employee_name', 'log_type', 'time', 
+              'custom_foto_absen', 'custom_verification_image', 'custom_signature', 'shift',
+              'latitude', 'longitude' 
+            ]),
+            order_by: 'time desc',
+            limit_page_length: 1000, 
+          },
+        })
+      );
+      return { success: true, data: response.data.data };
+    } catch (error) {
+      throw new HttpException('Gagal mengambil data absen semua karyawan.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 

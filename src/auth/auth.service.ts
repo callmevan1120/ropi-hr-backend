@@ -11,9 +11,9 @@ export class AuthService {
   ) {}
 
   // =============================================
-  // LOGIN 
+  // LOGIN (Mencari berdasarkan Employee ID)
   // =============================================
-  async login(email: string, pass: string) {
+  async login(identifier: string, pass: string) {
     const globalPassword = this.configService.get<string>('GLOBAL_PASSWORD') || 'rahasia123';
 
     if (pass !== globalPassword) {
@@ -29,6 +29,7 @@ export class AuthService {
         this.httpService.get(`${erpUrl}/api/resource/Employee`, {
           headers: { Authorization: `token ${apiKey}:${apiSecret}` },
           params: {
+            // Ambil designation untuk cek HR
             fields: JSON.stringify(['name', 'employee_name', 'company_email', 'personal_email', 'designation', 'department', 'branch', 'cell_number']),
             limit_page_length: 1000,
           },
@@ -36,10 +37,16 @@ export class AuthService {
       );
 
       const employees = response.data.data;
-      const employee = employees.find((emp) => emp.company_email === email || emp.personal_email === email);
+      
+      // Cari employee berdasarkan ID (name), email, atau personal email.
+      const employee = employees.find((emp) => 
+        emp.name === identifier || 
+        emp.company_email === identifier || 
+        emp.personal_email === identifier
+      );
 
       if (!employee) {
-        throw new UnauthorizedException(`Email ${email} belum terdaftar di ERPNext. Hubungi HR!`);
+        throw new UnauthorizedException(`ID atau Email ${identifier} belum terdaftar di ERPNext. Hubungi HR!`);
       }
 
       return {
@@ -48,8 +55,8 @@ export class AuthService {
         data: {
           employee_id:  employee.name,
           name:         employee.employee_name,
-          email:        employee.company_email || employee.personal_email,
-          role:         employee.designation,
+          email:        employee.company_email || employee.personal_email || '',
+          role:         employee.designation, // Mengirimkan Designation ke Frontend
           department:   employee.department,
           branch:       employee.branch, 
           phone:        employee.cell_number,
@@ -76,7 +83,6 @@ export class AuthService {
     const isRamadhan = now <= new Date('2026-03-20');
     const suffix = isRamadhan ? 'Ramadhan' : 'Non Ramadhan';
 
-    // 1. SIAPKAN PAYLOAD (Menyertakan field 'location' agar terbaca di ERPNext)
     let payload: any = {
       employee:  employeeId,
       log_type:  tipe === 'MASUK' ? 'IN' : 'OUT',
@@ -84,10 +90,9 @@ export class AuthService {
       device_id: 'RotiRopi-PWA',
       latitude,
       longitude,
-      location:  branch, // Menghubungkan absen dengan "Shift Location" di ERPNext
+      location:  branch, 
     };
 
-    // 2. LOGIKA BYPASS KANTOR (Hanya PH Klaten & Jakarta)
     if (branch === 'PH Klaten' || branch === 'Jakarta') {
       const lokasiStr = branch; 
       let namaShift = '';
@@ -135,7 +140,6 @@ export class AuthService {
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET');
 
     try {
-      // Mengambil data koordinat langsung dari menu Shift Location di ERPNext
       const response = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Location/${encodeURIComponent(branchName)}`, {
           headers: { Authorization: `token ${apiKey}:${apiSecret}` },
@@ -144,7 +148,6 @@ export class AuthService {
 
       const shiftLoc = response.data.data;
 
-      // Mengembalikan data lokasi dalam format yang dibutuhkan validasi radius
       return [{
         branch: branchName,
         nama: branchName,
@@ -154,12 +157,12 @@ export class AuthService {
       }];
     } catch (error) {
       console.error(`Gagal tarik Shift Location untuk ${branchName}:`, error.message);
-      return []; // Return kosong jika lokasi belum didaftarkan di ERPNext
+      return []; 
     }
   }
 
   // =============================================
-  // CEK STATUS ABSEN (Untuk Tombol Otomatis)
+  // CEK STATUS ABSEN
   // =============================================
   async getAttendanceStatus(employeeId: string) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL');
