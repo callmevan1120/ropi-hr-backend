@@ -19,7 +19,7 @@ export class AttendanceController {
     return this.attendanceService.getHistory(employee_id, from, to);
   }
 
-  //  ENDPOINT BARU KHUSUS HR DASHBOARD 
+  // ENDPOINT BARU KHUSUS HR DASHBOARD
   @Get('all-today')
   async getAllHistory(@Query('date') date: string) {
     return this.attendanceService.getAllHistory(date);

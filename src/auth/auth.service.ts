@@ -11,9 +11,9 @@ export class AuthService {
   ) {}
 
   // =============================================
-  // LOGIN (Mencari berdasarkan Employee ID)
+  // LOGIN (Mencari berdasarkan Email)
   // =============================================
-  async login(identifier: string, pass: string) {
+  async login(email: string, pass: string) {
     const globalPassword = this.configService.get<string>('GLOBAL_PASSWORD') || 'rahasia123';
 
     if (pass !== globalPassword) {
@@ -29,7 +29,7 @@ export class AuthService {
         this.httpService.get(`${erpUrl}/api/resource/Employee`, {
           headers: { Authorization: `token ${apiKey}:${apiSecret}` },
           params: {
-            // Ambil designation untuk cek HR
+            // PASTIKAN designation ADA DI SINI
             fields: JSON.stringify(['name', 'employee_name', 'company_email', 'personal_email', 'designation', 'department', 'branch', 'cell_number']),
             limit_page_length: 1000,
           },
@@ -38,15 +38,13 @@ export class AuthService {
 
       const employees = response.data.data;
       
-      // Cari employee berdasarkan ID (name), email, atau personal email.
+      // Cari employee berdasarkan company_email atau personal_email
       const employee = employees.find((emp) => 
-        emp.name === identifier || 
-        emp.company_email === identifier || 
-        emp.personal_email === identifier
+        emp.company_email === email || emp.personal_email === email
       );
 
       if (!employee) {
-        throw new UnauthorizedException(`ID atau Email ${identifier} belum terdaftar di ERPNext. Hubungi HR!`);
+        throw new UnauthorizedException(`Email ${email} belum terdaftar di ERPNext. Hubungi HR!`);
       }
 
       return {
@@ -69,7 +67,7 @@ export class AuthService {
   }
 
   // =============================================
-  // ABSEN — REVISI FINAL: Bypass Kantor & Natural Outlet
+  // ABSEN — Bypass Kantor & Natural Outlet
   // =============================================
   async absen(employeeId: string, tipe: 'MASUK' | 'KELUAR', latitude: number, longitude: number, branch: string) {
     const erpUrl    = this.configService.get<string>('ERPNEXT_URL');
@@ -125,14 +123,14 @@ export class AuthService {
         message: payload.shift ? `Berhasil mencatatkan absen ${payload.shift}` : `Berhasil mencatatkan absen.`,
         data: response.data.data,
       };
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error absen:', error.response?.data || error.message);
       throw new HttpException(error.response?.data?.message || 'Gagal mencatat absen.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
   // =============================================
-  // GET LOKASI — REVISI: Tarik dari DocType "Shift Location"
+  // GET LOKASI — Tarik dari DocType "Shift Location"
   // =============================================
   async getLokasi(branchName: string) {
     const erpUrl    = this.configService.get<string>('ERPNEXT_URL');

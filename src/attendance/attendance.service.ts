@@ -32,7 +32,7 @@ export class AttendanceService {
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
 
     try {
-      // 🔥 FIX JAM: Paksa server Vercel (UTC) untuk tambah 7 jam menjadi WIB
+      // FIX JAM: Paksa server Vercel (UTC) untuk tambah 7 jam menjadi WIB
       const nowUtc = new Date();
       const wibTime = new Date(nowUtc.getTime() + (7 * 60 * 60 * 1000));
       const timeString = wibTime.toISOString().replace('T', ' ').substring(0, 19);
@@ -56,7 +56,7 @@ export class AttendanceService {
         finalShift = `Senin - Kamis (${branchLabel} ${periodeLabel})`;
       }
 
-      // 🔥 UPDATE: TAMBAH FIELD TANDA TANGAN (custom_signature)
+      // TAMBAH FIELD TANDA TANGAN & LOKASI
       const payload = {
         employee: data.employee_id,
         log_type: logType,
@@ -120,7 +120,7 @@ export class AttendanceService {
     }
   }
 
-  // 🔥 FUNGSI BARU KHUSUS HR DASHBOARD 🔥
+  // FUNGSI BARU KHUSUS HR DASHBOARD
   async getAllHistory(date: string) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
