@@ -270,16 +270,22 @@ export class AuthService {
       branchNorm.includes('pku')      ||
       branchNorm.includes('delanggu');
 
+    // DEBUG — log semua kondisi agar mudah trace di Vercel
+    console.log(`[absen] employeeId=${employeeId} tipe=${tipe} branch="${branch}" branchNorm="${branchNorm}"`);
+    console.log(`[absen] hariIni=${hariIni} isHariKerja=${isHariKerja} isBranchValid=${isBranchValid}`);
+    console.log(`[absen] wibDate=${wibDate.toISOString()} tanggalStr=${tanggalStr} shiftFromFrontend="${shiftFromFrontend}"`);
+
     let namaShift: string | null = null;
 
     if (isHariKerja && isBranchValid) {
       namaShift = shiftFromFrontend?.trim() || this.buildShiftName(wibDate, branch);
+      console.log(`[absen] namaShift="${namaShift}"`);
 
-      // Hanya saat MASUK: pastikan Shift Assignment hari ini sudah benar
-      // agar ERPNext tidak marking sebagai "Off Shift"
       if (tipe === 'MASUK') {
         await this.upsertShiftAssignment(employeeId, namaShift, tanggalStr, erpUrl, authHeader);
       }
+    } else {
+      console.log(`[absen] SKIP upsertShiftAssignment — isHariKerja=${isHariKerja} isBranchValid=${isBranchValid}`);
     }
 
     const payload: any = {
