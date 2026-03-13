@@ -3,17 +3,11 @@ import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
 
-// ══════════════════════════════════════
-// HELPER: CEK RAMADHAN DINAMIS
-// ══════════════════════════════════════
 function checkIsRamadhan(date: Date): boolean {
   const tahun = date.getFullYear();
   const bulan = date.getMonth() + 1;
   const tgl = date.getDate();
-
-  // Ramadhan 2025: 1 Mar – 30 Mar
   if (tahun === 2025 && bulan === 3 && tgl >= 1 && tgl <= 30) return true;
-  // Ramadhan 2026: 18 Feb – 19 Mar
   if (tahun === 2026 && bulan === 2 && tgl >= 18) return true;
   if (tahun === 2026 && bulan === 3 && tgl <= 19) return true;
   return false;
@@ -26,37 +20,144 @@ export class AttendanceService {
     private readonly configService: ConfigService,
   ) {}
 
+  // =============================================
+  // HELPER — Upsert Shift Assignment untuk hari ini
+  // Dipanggil saat MASUK agar ERPNext tidak marking "Off Shift"
+  // =============================================
+  private async upsertShiftAssignment(
+    employeeId: string,
+    namaShift: string,
+    tanggalStr: string,
+    erpUrl: string,
+    authHeader: string,
+  ): Promise<void> {
+    try {
+      // 1. Cari Shift Assignment aktif untuk employee + tanggal hari ini
+      const cariRes = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Shift Assignment`, {
+          headers: { Authorization: authHeader },
+          params: {
+            filters: JSON.stringify([
+              ['employee',   '=',  employeeId],
+              ['start_date', '<=', tanggalStr],
+              ['docstatus',  '!=', 2],
+            ]),
+            fields: JSON.stringify(['name', 'shift_type', 'start_date', 'end_date', 'docstatus']),
+            limit_page_length: 10,
+          },
+        }),
+      );
+
+      const assignments: any[] = cariRes.data.data || [];
+      const aktif = assignments.filter(
+        (a) => !a.end_date || a.end_date >= tanggalStr,
+      );
+
+      // 2. Sudah ada assignment dengan shift yang sama & submitted → skip
+      const sudahBenar = aktif.find(
+        (a) => a.shift_type === namaShift && a.docstatus === 1,
+      );
+      if (sudahBenar) {
+        console.log(`[ShiftAssignment] Sudah ada & benar: ${namaShift} untuk ${employeeId}`);
+        return;
+      }
+
+      // 3. Cancel semua assignment lama yang konflik
+      const konflik = aktif.filter((a) => a.shift_type !== namaShift && a.docstatus === 1);
+      for (const a of konflik) {
+        try {
+          await firstValueFrom(
+            this.httpService.post(
+              `${erpUrl}/api/method/frappe.client.cancel`,
+              { doctype: 'Shift Assignment', name: a.name },
+              { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+            ),
+          );
+          console.log(`[ShiftAssignment] Cancelled lama: ${a.name} (${a.shift_type})`);
+        } catch (e: any) {
+          console.warn(`[ShiftAssignment] Gagal cancel ${a.name}:`, e.response?.data || e.message);
+        }
+      }
+
+      // 4. Buat Shift Assignment baru, hanya berlaku 1 hari ini
+      const buatRes = await firstValueFrom(
+        this.httpService.post(
+          `${erpUrl}/api/resource/Shift Assignment`,
+          {
+            employee:   employeeId,
+            shift_type: namaShift,
+            start_date: tanggalStr,
+            end_date:   tanggalStr,
+            company:    'PT. Juara Roti Indonesia',
+          },
+          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+        ),
+      );
+
+      const docName = buatRes.data.data?.name;
+      if (!docName) {
+        console.error('[ShiftAssignment] Buat gagal: tidak ada docName di response');
+        return;
+      }
+
+      // 5. Submit pakai frappe.client.submit
+      await firstValueFrom(
+        this.httpService.post(
+          `${erpUrl}/api/method/frappe.client.submit`,
+          { doc: { doctype: 'Shift Assignment', name: docName } },
+          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+        ),
+      );
+      console.log(`[ShiftAssignment] Buat & submit OK: ${namaShift} untuk ${employeeId} tgl ${tanggalStr}`);
+
+    } catch (error: any) {
+      console.error('[ShiftAssignment] Gagal upsert:', error.response?.data || error.message);
+    }
+  }
+
   async createCheckin(data: any) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
+    const authHeader = `token ${apiKey}:${apiSecret}`;
 
     try {
-      // FIX JAM: Paksa server Vercel (UTC) untuk tambah 7 jam menjadi WIB
+      // Waktu WIB (server Vercel UTC + 7 jam)
       const nowUtc = new Date();
       const wibTime = new Date(nowUtc.getTime() + (7 * 60 * 60 * 1000));
       const timeString = wibTime.toISOString().replace('T', ' ').substring(0, 19);
 
+      // Tanggal WIB untuk Shift Assignment (YYYY-MM-DD)
+      const yyyy = wibTime.getUTCFullYear();
+      const mm   = String(wibTime.getUTCMonth() + 1).padStart(2, '0');
+      const dd   = String(wibTime.getUTCDate()).padStart(2, '0');
+      const tanggalStr = `${yyyy}-${mm}-${dd}`;
+
       const inputTipe = (data.tipe || data.log_type || '').toUpperCase();
       const logType = (inputTipe === 'KELUAR' || inputTipe === 'OUT') ? 'OUT' : 'IN';
 
-      let finalShift = data.shift;
       const branch = data.branch || 'PH Klaten';
-      const day = wibTime.getDay();
+      const day = wibTime.getUTCDay();
+      const isHariKerja = day >= 1 && day <= 5;
 
       const isRamadhan = checkIsRamadhan(wibTime);
-      const branchLabel = branch.includes('Jakarta') ? 'Jakarta' : 'PH Klaten';
+      const branchLabel = branch.toLowerCase().includes('jakarta') ? 'Jakarta' : 'PH Klaten';
       const periodeLabel = isRamadhan ? 'Ramadhan' : 'Non Ramadhan';
 
-      if (day >= 1 && day <= 4) {
-        finalShift = `Senin - Kamis (${branchLabel} ${periodeLabel})`;
-      } else if (day === 5) {
+      let finalShift: string;
+      if (day === 5) {
         finalShift = `Jumat (${branchLabel} ${periodeLabel})`;
       } else {
         finalShift = `Senin - Kamis (${branchLabel} ${periodeLabel})`;
       }
 
-      // TAMBAH FIELD TANDA TANGAN & LOKASI
+      console.log(`[createCheckin] employee=${data.employee_id} logType=${logType} branch="${branch}" day=${day} isHariKerja=${isHariKerja} shift="${finalShift}" tanggal=${tanggalStr}`);
+
+      // Upsert Shift Assignment hanya saat MASUK di hari kerja
+      if (logType === 'IN' && isHariKerja) {
+        await this.upsertShiftAssignment(data.employee_id, finalShift, tanggalStr, erpUrl, authHeader);
+      }
+
       const payload = {
         employee: data.employee_id,
         log_type: logType,
@@ -64,8 +165,8 @@ export class AttendanceService {
         latitude: data.latitude,
         longitude: data.longitude,
         custom_foto_absen: data.image_verification,
-        custom_verification_image: data.custom_verification_image, 
-        custom_signature: data.custom_signature, // 🔥 BARIS BARU UNTUK TTD
+        custom_verification_image: data.custom_verification_image,
+        custom_signature: data.custom_signature,
         shift: finalShift,
         device_id: 'Vite-React-App',
       };
@@ -73,7 +174,7 @@ export class AttendanceService {
       const response = await firstValueFrom(
         this.httpService.post(`${erpUrl}/api/resource/Employee Checkin`, payload, {
           headers: {
-            'Authorization': `token ${apiKey}:${apiSecret}`,
+            'Authorization': authHeader,
             'Content-Type': 'application/json',
           },
         })
@@ -106,7 +207,7 @@ export class AttendanceService {
               ['time', '<=', `${to} 23:59:59`],
             ]),
             fields: JSON.stringify([
-              'name', 'employee', 'log_type', 'time', 
+              'name', 'employee', 'log_type', 'time',
               'custom_foto_absen', 'custom_verification_image', 'custom_signature', 'shift'
             ]),
             order_by: 'time desc',
@@ -120,7 +221,6 @@ export class AttendanceService {
     }
   }
 
-  // 🔥 FUNGSI REVISI KHUSUS HR DASHBOARD (RANGE TANGGAL) 🔥
   async getAllHistory(from: string, to: string) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
@@ -135,14 +235,13 @@ export class AttendanceService {
               ['time', '>=', `${from} 00:00:00`],
               ['time', '<=', `${to} 23:59:59`],
             ]),
-            // UPDATE: Masukkan latitude dan longitude untuk Fitur G-Maps HR!
             fields: JSON.stringify([
-              'name', 'employee', 'employee_name', 'log_type', 'time', 
+              'name', 'employee', 'employee_name', 'log_type', 'time',
               'custom_foto_absen', 'custom_verification_image', 'custom_signature', 'shift',
-              'latitude', 'longitude' 
+              'latitude', 'longitude'
             ]),
             order_by: 'time desc',
-            limit_page_length: 5000, // Diperbesar supaya muat 1 bulan
+            limit_page_length: 5000,
           },
         })
       );
@@ -310,51 +409,39 @@ export class AttendanceService {
             /^data:([A-Za-z0-9+\/]+\/[A-Za-z0-9+\/]+);base64,(.+)$/,
           );
 
-          if (!matches) {
-            throw new Error('Format base64 tidak valid dari frontend');
-          }
+          if (!matches) throw new Error('Format base64 tidak valid dari frontend');
 
           const mimeType = matches[1];
           const pureBase64 = matches[2];
           const fileBuffer = Buffer.from(pureBase64, 'base64');
 
           const extMap: Record<string, string> = {
-            'image/jpeg': 'jpg',
-            'image/jpg': 'jpg',
-            'image/png': 'png',
-            'image/gif': 'gif',
-            'image/webp': 'webp',
-            'application/pdf': 'pdf',
+            'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png',
+            'image/gif': 'gif', 'image/webp': 'webp', 'application/pdf': 'pdf',
           };
           const ext = extMap[mimeType] ?? 'jpg';
           const safeFileName = `Bukti_${docName.replace(/-/g, '_')}.${ext}`;
-
           const boundary = `----FormBoundary${Date.now()}`;
 
           const beforeFile = [
             `--${boundary}`,
             `Content-Disposition: form-data; name="file"; filename="${safeFileName}"`,
             `Content-Type: ${mimeType}`,
-            '',
-            '',
+            '', '',
           ].join('\r\n');
 
           const afterFile = [
             '',
             `--${boundary}`,
             `Content-Disposition: form-data; name="is_private"`,
-            '',
-            '0',
+            '', '0',
             `--${boundary}`,
             `Content-Disposition: form-data; name="doctype"`,
-            '',
-            'Leave Application',
+            '', 'Leave Application',
             `--${boundary}`,
             `Content-Disposition: form-data; name="docname"`,
-            '',
-            docName,
-            `--${boundary}--`,
-            '',
+            '', docName,
+            `--${boundary}--`, '',
           ].join('\r\n');
 
           const bodyBuffer = Buffer.concat([
@@ -364,27 +451,20 @@ export class AttendanceService {
           ]);
 
           await firstValueFrom(
-            this.httpService.post(
-              `${erpUrl}/api/method/upload_file`,
-              bodyBuffer,
-              {
-                headers: {
-                  Authorization: authHeader,
-                  'Content-Type': `multipart/form-data; boundary=${boundary}`,
-                  'Content-Length': bodyBuffer.length.toString(),
-                },
-                maxBodyLength: Infinity,
-                maxContentLength: Infinity,
+            this.httpService.post(`${erpUrl}/api/method/upload_file`, bodyBuffer, {
+              headers: {
+                Authorization: authHeader,
+                'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                'Content-Length': bodyBuffer.length.toString(),
               },
-            ),
+              maxBodyLength: Infinity,
+              maxContentLength: Infinity,
+            }),
           );
 
-          console.log(`[✅ Upload OK] Lampiran ${safeFileName} berhasil dikirim ke ERPNext`);
+          console.log(`[Upload OK] Lampiran ${safeFileName} berhasil dikirim`);
         } catch (fileErr: any) {
-          console.error(
-            '[⚠️ Upload Gagal] Izin tetap tersimpan, tapi lampiran gagal:',
-            fileErr.response?.data || fileErr.message,
-          );
+          console.error('[Upload Gagal] Izin tersimpan, lampiran gagal:', fileErr.response?.data || fileErr.message);
         }
       }
 
@@ -398,20 +478,11 @@ export class AttendanceService {
       const errorString = JSON.stringify(error.response?.data || {});
 
       if (errorString.includes('Overlap')) {
-        throw new HttpException(
-          'Gagal: Sudah ada izin di tanggal tersebut.',
-          HttpStatus.BAD_REQUEST,
-        );
+        throw new HttpException('Gagal: Sudah ada izin di tanggal tersebut.', HttpStatus.BAD_REQUEST);
       } else if (errorString.includes('allocation')) {
-        throw new HttpException(
-          'Gagal: Kuota izin tidak mencukupi.',
-          HttpStatus.BAD_REQUEST,
-        );
+        throw new HttpException('Gagal: Kuota izin tidak mencukupi.', HttpStatus.BAD_REQUEST);
       } else {
-        throw new HttpException(
-          'Gagal menyimpan pengajuan izin.',
-          HttpStatus.INTERNAL_SERVER_ERROR,
-        );
+        throw new HttpException('Gagal menyimpan pengajuan izin.', HttpStatus.INTERNAL_SERVER_ERROR);
       }
     }
   }

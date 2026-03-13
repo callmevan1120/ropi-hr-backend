@@ -19,7 +19,6 @@ export class AuthController {
   // ─── POST /api/auth/login ───────────────────
   @Post('auth/login')
   async login(@Body() body: any) {
-    // Tangkap data berdasar ID karyawan atau email. Karena frontend mengirim employeeId.
     const identifier = body.employeeId || body.email;
     return this.authService.login(identifier, body.password);
   }
@@ -34,7 +33,8 @@ export class AuthController {
   // ─── POST /api/attendance/checkin ───────────
   @Post('attendance/checkin')
   async checkin(@Body() body: any) {
-    const { employee_id, tipe, latitude, longitude, branch } = body;
+    // FIX: ambil juga field 'shift' dari body yang dikirim frontend
+    const { employee_id, tipe, latitude, longitude, branch, shift } = body;
 
     if (!employee_id || !tipe || latitude === undefined || longitude === undefined || !branch) {
       throw new HttpException(
@@ -57,7 +57,7 @@ export class AuthController {
 
     for (const lokasi of lokasiKantor) {
       const jarak = Math.round(hitungJarak(latitude, longitude, lokasi.lat, lokasi.lng));
-      
+
       if (jarak < lokasiTerdekat.jarak) {
         lokasiTerdekat = { nama: lokasi.nama, jarak, radius: lokasi.radius };
       }
@@ -75,6 +75,7 @@ export class AuthController {
       );
     }
 
-    return this.authService.absen(employee_id, tipe, latitude, longitude, branch);
+    // FIX: teruskan 'shift' dari frontend ke authService.absen()
+    return this.authService.absen(employee_id, tipe, latitude, longitude, branch, shift);
   }
 }
