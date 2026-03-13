@@ -325,14 +325,21 @@ export class AuthService {
     const erpUrl    = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey    = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
+    const authHeader = `token ${apiKey}:${apiSecret}`;
 
-    // Shift Location di ERPNext pakai UPPERCASE (misal "PH KLATEN")
-    // sedangkan branch di Employee pakai Title Case (misal "PH Klaten")
-    // → coba keduanya
+    // Helper: ERPNext mungkin simpan koordinat dengan koma desimal (misal "-7,615")
+    // parseFloat('-7,615') = -7 (salah!) → ganti koma ke titik dulu
+    const parseKoordinat = (val: any): number => {
+      if (val === null || val === undefined) return 0;
+      return parseFloat(String(val).replace(',', '.'));
+    };
+
+    // Coba GET langsung dengan berbagai variasi nama (case-insensitive)
     const namaCandidates = [
       branchName,
       branchName.toUpperCase(),
       branchName.toLowerCase(),
+      branchName.replace(/\s+/g, ' ').trim(),
     ];
 
     for (const nama of namaCandidates) {
@@ -340,24 +347,61 @@ export class AuthService {
         const response = await firstValueFrom(
           this.httpService.get(
             `${erpUrl}/api/resource/Shift Location/${encodeURIComponent(nama)}`,
-            { headers: { Authorization: `token ${apiKey}:${apiSecret}` } },
+            { headers: { Authorization: authHeader } },
           ),
         );
-
         const shiftLoc = response.data.data;
+        console.log(`[getLokasi] Berhasil dengan nama: "${nama}"`, shiftLoc);
         return [{
           branch: branchName,
-          nama:   branchName,
-          lat:    parseFloat(shiftLoc.latitude),
-          lng:    parseFloat(shiftLoc.longitude),
-          radius: shiftLoc.radius || 150,
+          nama:   nama,
+          lat:    parseKoordinat(shiftLoc.latitude),
+          lng:    parseKoordinat(shiftLoc.longitude),
+          radius: shiftLoc.checkin_radius || shiftLoc.radius || 100,
         }];
       } catch {
         // coba kandidat berikutnya
       }
     }
 
-    console.error(`Gagal tarik Shift Location untuk semua variasi nama: ${branchName}`);
+    // Fallback: cari semua Shift Location lalu filter manual (case-insensitive)
+    try {
+      console.log(`[getLokasi] Exact match gagal, coba list semua Shift Location...`);
+      const listRes = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Shift Location`, {
+          headers: { Authorization: authHeader },
+          params: {
+            fields: JSON.stringify(['name', 'latitude', 'longitude', 'checkin_radius']),
+            limit_page_length: 50,
+          },
+        }),
+      );
+      const allLokasi: any[] = listRes.data.data || [];
+      console.log(`[getLokasi] Daftar Shift Location:`, allLokasi.map(l => l.name));
+
+      // Cari yang nama-nya mirip branch (case-insensitive, partial match)
+      const branchLower = branchName.toLowerCase().replace(/\s+/g, '');
+      const cocok = allLokasi.find(l =>
+        l.name.toLowerCase().replace(/\s+/g, '').includes(branchLower) ||
+        branchLower.includes(l.name.toLowerCase().replace(/\s+/g, ''))
+      );
+
+      if (cocok) {
+        console.log(`[getLokasi] Match partial: "${cocok.name}"`);
+        return [{
+          branch: branchName,
+          nama:   cocok.name,
+          lat:    parseKoordinat(cocok.latitude),
+          lng:    parseKoordinat(cocok.longitude),
+          radius: cocok.checkin_radius || cocok.radius || 100,
+        }];
+      }
+
+      console.error(`[getLokasi] Tidak ada Shift Location yang cocok untuk "${branchName}". Available:`, allLokasi.map(l => l.name));
+    } catch (e: any) {
+      console.error(`[getLokasi] Gagal list Shift Location:`, e.response?.data || e.message);
+    }
+
     return [];
   }
 
