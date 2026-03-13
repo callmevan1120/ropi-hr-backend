@@ -30,7 +30,18 @@ export class AuthService {
     const hari         = wibDate.getDay();
     const isFriday     = hari === 5;
     const ramadhan     = this.hitungIsRamadhan(wibDate);
-    const branchLabel  = branch.trim().toLowerCase().includes('jakarta') ? 'Jakarta' : 'PH Klaten';
+    const b            = branch.trim().toLowerCase();
+
+    // Mapping branch ke label shift di ERPNext
+    let branchLabel: string;
+    if (b.includes('jakarta')) {
+      branchLabel = 'Jakarta';
+    } else {
+      // PH Klaten, PKU Delanggu, dan cabang Klaten lainnya → pakai label 'PH Klaten'
+      // Sesuaikan jika ERPNext punya label berbeda untuk PKU Delanggu
+      branchLabel = 'PH Klaten';
+    }
+
     const hariLabel    = isFriday ? 'Jumat' : 'Senin - Kamis';
     const periodeLabel = ramadhan ? 'Ramadhan' : 'Non Ramadhan';
     return `${hariLabel} (${branchLabel} ${periodeLabel})`;
@@ -92,9 +103,9 @@ export class AuthService {
             filters: JSON.stringify([
               ['employee',   '=',  employeeId],
               ['start_date', '<=', tanggalStr],
-              ['docstatus',  '=',  1],
+              ['docstatus',  '!=', 2],           // bukan yang sudah di-cancel
             ]),
-            fields: JSON.stringify(['name', 'shift_type', 'start_date', 'end_date']),
+            fields: JSON.stringify(['name', 'shift_type', 'start_date', 'end_date', 'docstatus']),
             limit_page_length: 10,
           },
         }),
@@ -102,31 +113,35 @@ export class AuthService {
 
       const assignments: any[] = cariRes.data.data || [];
 
-      // Filter: hanya yang masih aktif hari ini
+      // Filter: hanya yang masih aktif hari ini (end_date null atau >= tanggal)
       const aktif = assignments.filter(
         (a) => !a.end_date || a.end_date >= tanggalStr,
       );
 
-      // 2. Kalau sudah ada assignment dengan shift yang sama → skip
-      const sudahAda = aktif.find((a) => a.shift_type === namaShift);
-      if (sudahAda) {
+      // 2. Sudah ada assignment dengan shift yang sama & sudah submitted → skip
+      const sudahBenar = aktif.find(
+        (a) => a.shift_type === namaShift && a.docstatus === 1,
+      );
+      if (sudahBenar) {
         console.log(`[ShiftAssignment] Sudah ada & benar: ${namaShift} untuk ${employeeId}`);
         return;
       }
 
-      // 3. Cancel semua assignment lama yang konflik
-      for (const a of aktif) {
+      // 3. Cancel semua assignment lama yang konflik (shift berbeda)
+      //    PAKAI frappe.client.cancel — bukan /cancel path yang tidak exist
+      const konflik = aktif.filter((a) => a.shift_type !== namaShift && a.docstatus === 1);
+      for (const a of konflik) {
         try {
           await firstValueFrom(
             this.httpService.post(
-              `${erpUrl}/api/resource/Shift Assignment/${a.name}/cancel`,
-              {},
+              `${erpUrl}/api/method/frappe.client.cancel`,
+              { doctype: 'Shift Assignment', name: a.name },
               { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
             ),
           );
           console.log(`[ShiftAssignment] Cancelled lama: ${a.name} (${a.shift_type})`);
-        } catch (e) {
-          console.warn(`[ShiftAssignment] Gagal cancel ${a.name}:`, e.message);
+        } catch (e: any) {
+          console.warn(`[ShiftAssignment] Gagal cancel ${a.name}:`, e.response?.data || e.message);
         }
       }
 
@@ -146,18 +161,21 @@ export class AuthService {
       );
 
       const docName = buatRes.data.data?.name;
-
-      // 5. Submit agar ERPNext kenali sebagai assignment aktif
-      if (docName) {
-        await firstValueFrom(
-          this.httpService.post(
-            `${erpUrl}/api/resource/Shift Assignment/${docName}/submit`,
-            {},
-            { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-          ),
-        );
-        console.log(`[ShiftAssignment] Buat & submit OK: ${namaShift} untuk ${employeeId} tgl ${tanggalStr}`);
+      if (!docName) {
+        console.error('[ShiftAssignment] Buat gagal: tidak ada docName di response');
+        return;
       }
+
+      // 5. Submit pakai frappe.client.submit — bukan /submit path
+      await firstValueFrom(
+        this.httpService.post(
+          `${erpUrl}/api/method/frappe.client.submit`,
+          { doc: { doctype: 'Shift Assignment', name: docName } },
+          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+        ),
+      );
+      console.log(`[ShiftAssignment] Buat & submit OK: ${namaShift} untuk ${employeeId} tgl ${tanggalStr}`);
+
     } catch (error: any) {
       // Error shift assignment TIDAK boleh hentikan proses checkin
       console.error('[ShiftAssignment] Gagal upsert:', error.response?.data || error.message);
@@ -246,9 +264,11 @@ export class AuthService {
     const isHariKerja   = hariIni >= 1 && hariIni <= 5;
     const branchNorm    = (branch || '').trim().toLowerCase();
     const isBranchValid =
-      branchNorm.includes('klaten') ||
-      branchNorm.includes('ph')     ||
-      branchNorm.includes('jakarta');
+      branchNorm.includes('klaten')   ||
+      branchNorm.includes('ph')       ||
+      branchNorm.includes('jakarta')  ||
+      branchNorm.includes('pku')      ||
+      branchNorm.includes('delanggu');
 
     let namaShift: string | null = null;
 
@@ -306,26 +326,39 @@ export class AuthService {
     const apiKey    = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
 
-    try {
-      const response = await firstValueFrom(
-        this.httpService.get(
-          `${erpUrl}/api/resource/Shift Location/${encodeURIComponent(branchName)}`,
-          { headers: { Authorization: `token ${apiKey}:${apiSecret}` } },
-        ),
-      );
+    // Shift Location di ERPNext pakai UPPERCASE (misal "PH KLATEN")
+    // sedangkan branch di Employee pakai Title Case (misal "PH Klaten")
+    // → coba keduanya
+    const namaCandidates = [
+      branchName,
+      branchName.toUpperCase(),
+      branchName.toLowerCase(),
+    ];
 
-      const shiftLoc = response.data.data;
-      return [{
-        branch: branchName,
-        nama:   branchName,
-        lat:    parseFloat(shiftLoc.latitude),
-        lng:    parseFloat(shiftLoc.longitude),
-        radius: shiftLoc.radius || 150,
-      }];
-    } catch (error) {
-      console.error(`Gagal tarik Shift Location untuk ${branchName}:`, error.message);
-      return [];
+    for (const nama of namaCandidates) {
+      try {
+        const response = await firstValueFrom(
+          this.httpService.get(
+            `${erpUrl}/api/resource/Shift Location/${encodeURIComponent(nama)}`,
+            { headers: { Authorization: `token ${apiKey}:${apiSecret}` } },
+          ),
+        );
+
+        const shiftLoc = response.data.data;
+        return [{
+          branch: branchName,
+          nama:   branchName,
+          lat:    parseFloat(shiftLoc.latitude),
+          lng:    parseFloat(shiftLoc.longitude),
+          radius: shiftLoc.radius || 150,
+        }];
+      } catch {
+        // coba kandidat berikutnya
+      }
     }
+
+    console.error(`Gagal tarik Shift Location untuk semua variasi nama: ${branchName}`);
+    return [];
   }
 
   // =============================================
