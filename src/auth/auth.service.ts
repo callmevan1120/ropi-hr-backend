@@ -74,11 +74,23 @@ export class AuthService {
     const apiKey    = this.configService.get<string>('ERPNEXT_API_KEY');
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET');
 
+    // FIX ZONA WAKTU: Pastikan Server Vercel Menggunakan Waktu WIB (Asia/Jakarta) 
     const now = new Date();
-    const hariIni = now.getDay(); 
-    const waktuStr = now.toISOString().replace('T', ' ').substring(0, 19);
+    const wibString = now.toLocaleString('en-US', { timeZone: 'Asia/Jakarta' });
+    const wibDate = new Date(wibString);
 
-    const isRamadhan = now <= new Date('2026-03-20');
+    const hariIni = wibDate.getDay(); // 0 = Minggu, 1 = Senin, ..., 5 = Jumat, 6 = Sabtu
+
+    // Format waktu manual YYYY-MM-DD HH:mm:ss sesuai standar ERPNext
+    const yyyy = wibDate.getFullYear();
+    const mm = String(wibDate.getMonth() + 1).padStart(2, '0');
+    const dd = String(wibDate.getDate()).padStart(2, '0');
+    const hh = String(wibDate.getHours()).padStart(2, '0');
+    const min = String(wibDate.getMinutes()).padStart(2, '0');
+    const ss = String(wibDate.getSeconds()).padStart(2, '0');
+    const waktuStr = `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+
+    const isRamadhan = wibDate <= new Date('2026-03-20T23:59:59');
     const suffix = isRamadhan ? 'Ramadhan' : 'Non Ramadhan';
 
     let payload: any = {
@@ -91,10 +103,12 @@ export class AuthService {
       location:  branch, 
     };
 
+    // LOGIKA INJEKSI SHIFT 
     if (branch === 'PH Klaten' || branch === 'Jakarta') {
       const lokasiStr = branch; 
       let namaShift = '';
       
+      // Jika hariIni adalah 5 (Jumat WIB)
       if (hariIni === 5) {
         namaShift = `Jumat (${lokasiStr} ${suffix})`;
       } else {
@@ -167,7 +181,14 @@ export class AuthService {
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY');
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET');
 
-    const hariIni = new Date().toISOString().split('T')[0];
+    // Pastikan pengecekan hari ini juga menggunakan WIB
+    const now = new Date();
+    const wibString = now.toLocaleString('en-US', { timeZone: 'Asia/Jakarta' });
+    const wibDate = new Date(wibString);
+    const yyyy = wibDate.getFullYear();
+    const mm = String(wibDate.getMonth() + 1).padStart(2, '0');
+    const dd = String(wibDate.getDate()).padStart(2, '0');
+    const hariIniWib = `${yyyy}-${mm}-${dd}`;
 
     try {
         const response = await firstValueFrom(
@@ -176,7 +197,7 @@ export class AuthService {
                 params: {
                     filters: JSON.stringify([
                         ['employee', '=', employeeId],
-                        ['time', '>=', `${hariIni} 00:00:00`],
+                        ['time', '>=', `${hariIniWib} 00:00:00`],
                     ]),
                     fields: JSON.stringify(['log_type']),
                     order_by: 'time desc',
