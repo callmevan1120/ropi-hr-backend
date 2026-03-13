@@ -4,9 +4,9 @@ import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
 
 function checkIsRamadhan(date: Date): boolean {
-  const tahun = date.getFullYear();
-  const bulan = date.getMonth() + 1;
-  const tgl = date.getDate();
+  const tahun = date.getUTCFullYear();
+  const bulan = date.getUTCMonth() + 1;
+  const tgl = date.getUTCDate();
   if (tahun === 2025 && bulan === 3 && tgl >= 1 && tgl <= 30) return true;
   if (tahun === 2026 && bulan === 2 && tgl >= 18) return true;
   if (tahun === 2026 && bulan === 3 && tgl <= 19) return true;
@@ -22,7 +22,7 @@ export class AttendanceService {
 
   // =============================================
   // HELPER — Upsert Shift Assignment untuk hari ini
-  // Dipanggil saat MASUK agar ERPNext tidak marking "Off Shift"
+  // Tahan banting terhadap TimestampMismatchError!
   // =============================================
   private async upsertShiftAssignment(
     employeeId: string,
@@ -38,9 +38,9 @@ export class AttendanceService {
           headers: { Authorization: authHeader },
           params: {
             filters: JSON.stringify([
-              ['employee',   '=',  employeeId],
+              ['employee', '=', employeeId],
               ['start_date', '<=', tanggalStr],
-              ['docstatus',  '!=', 2],
+              ['docstatus', '!=', 2],
             ]),
             fields: JSON.stringify(['name', 'shift_type', 'start_date', 'end_date', 'docstatus']),
             limit_page_length: 10,
@@ -49,27 +49,23 @@ export class AttendanceService {
       );
 
       const assignments: any[] = cariRes.data.data || [];
-      const aktif = assignments.filter(
-        (a) => !a.end_date || a.end_date >= tanggalStr,
-      );
+      const aktif = assignments.filter((a) => !a.end_date || a.end_date >= tanggalStr);
 
-      // 2. Sudah ada assignment dengan shift yang sama & submitted → skip
-      const sudahBenar = aktif.find(
-        (a) => a.shift_type === namaShift && a.docstatus === 1,
-      );
+      // 2. Sudah ada assignment dengan shift yang sama & submitted → Selesai
+      const sudahBenar = aktif.find((a) => a.shift_type === namaShift && a.docstatus === 1);
       if (sudahBenar) {
         console.log(`[ShiftAssignment] Sudah ada & benar: ${namaShift} untuk ${employeeId}`);
         return;
       }
 
-      // 3. Cancel semua assignment lama yang konflik
+      // 3. Batalkan (Cancel) assignment lama yang KONFLIK menggunakan PUT (Mencegah Timestamp Mismatch)
       const konflik = aktif.filter((a) => a.shift_type !== namaShift && a.docstatus === 1);
       for (const a of konflik) {
         try {
           await firstValueFrom(
-            this.httpService.post(
-              `${erpUrl}/api/method/frappe.client.cancel`,
-              { doctype: 'Shift Assignment', name: a.name },
+            this.httpService.put(
+              `${erpUrl}/api/resource/Shift Assignment/${a.name}`,
+              { docstatus: 2 }, // 2 = Force Cancelled
               { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
             ),
           );
@@ -79,35 +75,22 @@ export class AttendanceService {
         }
       }
 
-      // 4. Buat Shift Assignment baru, hanya berlaku 1 hari ini
+      // 4. Buat Shift Assignment baru dan langsung di-Submit (docstatus: 1)
       const buatRes = await firstValueFrom(
         this.httpService.post(
           `${erpUrl}/api/resource/Shift Assignment`,
           {
-            employee:   employeeId,
+            employee: employeeId,
             shift_type: namaShift,
             start_date: tanggalStr,
-            end_date:   tanggalStr,
-            company:    'PT. Juara Roti Indonesia',
+            end_date: tanggalStr,
+            company: 'PT. Juara Roti Indonesia',
+            docstatus: 1, // Langsung Submit, jangan di-draft lalu di-submit pakai RPC
           },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
         ),
       );
 
-      const docName = buatRes.data.data?.name;
-      if (!docName) {
-        console.error('[ShiftAssignment] Buat gagal: tidak ada docName di response');
-        return;
-      }
-
-      // 5. Submit pakai frappe.client.submit
-      await firstValueFrom(
-        this.httpService.post(
-          `${erpUrl}/api/method/frappe.client.submit`,
-          { doc: { doctype: 'Shift Assignment', name: docName } },
-          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ),
-      );
       console.log(`[ShiftAssignment] Buat & submit OK: ${namaShift} untuk ${employeeId} tgl ${tanggalStr}`);
 
     } catch (error: any) {
@@ -137,7 +120,7 @@ export class AttendanceService {
       const logType = (inputTipe === 'KELUAR' || inputTipe === 'OUT') ? 'OUT' : 'IN';
 
       const branch = data.branch || 'PH Klaten';
-      const day = wibTime.getUTCDay();
+      const day = wibTime.getUTCDay(); // Pasti mengikuti hari WIB
       const isHariKerja = day >= 1 && day <= 5;
 
       const isRamadhan = checkIsRamadhan(wibTime);
@@ -168,7 +151,7 @@ export class AttendanceService {
         custom_verification_image: data.custom_verification_image,
         custom_signature: data.custom_signature,
         shift: finalShift,
-        device_id: 'Vite-React-App',
+        device_id: 'RopiHR-PWA',
       };
 
       const response = await firstValueFrom(
