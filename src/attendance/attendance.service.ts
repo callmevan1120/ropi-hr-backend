@@ -30,47 +30,42 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // HELPER: Normalisasi nama shift kantor agar cocok dengan ERPNext
+  // HELPER: Normalisasi nama shift kantor ke format ERPNext
   //
   // Shift Type ERPNext (dari Shift_Type.xlsx):
-  //   "Senin - Kamis (PH Klaten Non Ramadhan)"
-  //   "Senin - Kamis (PH Klaten Ramadhan)"
-  //   "Senin - Kamis (Jakarta Non Ramadhan)"
-  //   "Senin - Kamis (Jakarta Ramadhan)"
-  //   "Jumat (PH Klaten Non Ramadhan)"
-  //   "Jumat (PH Klaten Ramadhan)"
-  //   "Jumat (Jakarta Non Ramadhan)"
-  //   "Jumat (Jakarta Ramadhan)"
+  //   "Senin - Kamis (PH Klaten Non Ramadhan)"  07:30–16:30
+  //   "Senin - Kamis (PH Klaten Ramadhan)"      07:00–15:30
+  //   "Jumat (PH Klaten Non Ramadhan)"           07:30–17:00
+  //   "Jumat (PH Klaten Ramadhan)"               07:00–16:00
+  //   (sama untuk Jakarta)
   //
-  // Frontend mengirim format: "Senin - Kamis PH Klaten Non Ramadhan"
-  //   (tanpa tanda kurung) – perlu dikonversi ke format ERPNext.
+  // Satpam TIDAK punya Shift Type terpisah di ERPNext.
+  // Jam Satpam (30 mnt lebih awal/lambat) hanya berlaku di tampilan frontend.
+  // Shift Assignment yang dibuat untuk Satpam tetap pakai nama shift kantor biasa.
+  //
+  // Format yang mungkin diterima dari frontend:
+  //   BARU (dengan kurung) : "Senin - Kamis (PH Klaten Non Ramadhan)"  ← sudah benar
+  //   LAMA (tanpa kurung)  : "Senin - Kamis PH Klaten Non Ramadhan"    ← perlu konversi
   // ─────────────────────────────────────────────────────────────────
   private normalizeOfficeShiftName(shiftName: string): string {
     if (!shiftName) return shiftName;
 
-    // Pola yang dikirim frontend: "{HariLabel} {BranchLabel} {PeriodeLabel}{SatpamLabel}"
-    // Contoh: "Senin - Kamis PH Klaten Non Ramadhan"
-    //         "Jumat Jakarta Ramadhan"
-    //         "Senin - Kamis PH Klaten Non Ramadhan Satpam"
-    //
-    // Target ERPNext: "Senin - Kamis (PH Klaten Non Ramadhan)"
-    // Satpam memakai shift yang sama (tidak ada shift terpisah), cukup strip label Satpam.
-
+    // Strip label Satpam jika ada (Satpam tidak punya shift terpisah di ERPNext)
     let name = shiftName.trim().replace(/\s+Satpam\s*$/i, '').trim();
 
-    // Deteksi hari
-    const isFriday = name.toLowerCase().startsWith('jumat');
-    const hariPart = isFriday ? 'Jumat' : 'Senin - Kamis';
+    // Jika sudah dalam format ERPNext (ada tanda kurung) → langsung return
+    if (name.includes('(') && name.includes(')')) return name;
 
-    // Deteksi periode
+    // Konversi format lama "Senin - Kamis PH Klaten Non Ramadhan"
+    // ke format baru  "Senin - Kamis (PH Klaten Non Ramadhan)"
+    const isFriday   = /^jumat/i.test(name);
     const isRamadhan = /ramadhan/i.test(name);
+    const isJakarta  = /jakarta/i.test(name);
+
+    const hariPart   = isFriday ? 'Jumat' : 'Senin - Kamis';
+    const branchPart = isJakarta ? 'Jakarta' : 'PH Klaten';
     const periodePart = isRamadhan ? 'Ramadhan' : 'Non Ramadhan';
 
-    // Deteksi branch
-    const isJakarta = /jakarta/i.test(name);
-    const branchPart = isJakarta ? 'Jakarta' : 'PH Klaten';
-
-    // Gabungkan ke format ERPNext
     return `${hariPart} (${branchPart} ${periodePart})`;
   }
 
