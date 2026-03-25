@@ -62,6 +62,11 @@ export class AttendanceController {
     return this.attendanceService.submitShiftRequest(body);
   }
 
+  @Get('shift-history')
+  async getShiftHistory(@Query('employee_id') employeeId: string) {
+    return this.attendanceService.getShiftHistory(employeeId);
+  }
+
   @Get('file')
   async getFile(@Query('path') filePath: string, @Res() res: any) {
     try {

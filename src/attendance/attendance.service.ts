@@ -186,13 +186,51 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET ACTIVE SHIFT (Cari Shift Assignment yang di-ACC hari ini)
+  // HELPER: Ambil detail jam Shift Type dari ERPNext
+  // ─────────────────────────────────────────────────────────────────
+  private async getShiftTypeDetail(
+    erpUrl: string,
+    authHeader: string,
+    shiftType: string,
+  ): Promise<{ shift_name: string; start_time: string; end_time: string } | null> {
+    try {
+      const res = await firstValueFrom(
+        this.httpService.get(
+          `${erpUrl}/api/resource/Shift Type/${encodeURIComponent(shiftType)}`,
+          { headers: { Authorization: authHeader } },
+        ),
+      );
+      const d = res.data.data;
+      const fmt = (raw: string | null): string => {
+        if (!raw) return '00:00';
+        const parts = raw.split(' ');
+        return parts[parts.length - 1].substring(0, 5);
+      };
+      return { shift_name: shiftType, start_time: fmt(d.start_time), end_time: fmt(d.end_time) };
+    } catch {
+      return null;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // GET ACTIVE SHIFT
+  //
+  // Strategi berurutan (stop pada yang pertama berhasil):
+  //  1. Shift Assignment (docstatus=1, start_date <= hari ini,
+  //     end_date >= hari ini ATAU end_date kosong/null)
+  //  2. Shift Request (status=Approved, docstatus=1,
+  //     from_date <= hari ini, to_date >= hari ini ATAU kosong)
+  //
+  // Shift Request yang di-approve HRD di ERPNext kadang tidak
+  // otomatis menghasilkan Shift Assignment (tergantung konfigurasi),
+  // sehingga fallback ke Shift Request diperlukan.
   // ─────────────────────────────────────────────────────────────────
   async getActiveShift(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
     const todayStr = this.getTodayWib();
 
     try {
+      // ── Strategi 1: Shift Assignment ─────────────────────────────
       const assignRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Assignment`, {
           headers: { Authorization: authHeader },
@@ -204,41 +242,61 @@ export class AttendanceService {
             ]),
             fields:            JSON.stringify(['name', 'shift_type', 'start_date', 'end_date']),
             order_by:          'start_date desc',
-            limit_page_length: 5,
+            limit_page_length: 10,
           },
         }),
       );
 
       const assignments: any[] = assignRes.data.data ?? [];
-      const aktif = assignments.find((a) => !a.end_date || a.end_date >= todayStr);
-
-      if (!aktif) {
-        return {
-          success: false,
-          message: 'Belum ada Shift. Silakan Ajukan Shift ke HRD.',
-        };
-      }
-
-      const shiftRes = await firstValueFrom(
-        this.httpService.get(
-          `${erpUrl}/api/resource/Shift Type/${encodeURIComponent(aktif.shift_type)}`,
-          { headers: { Authorization: authHeader } },
-        ),
+      // end_date null = open-ended (tidak ada batas akhir)
+      const aktifAssignment = assignments.find(
+        (a) => !a.end_date || a.end_date >= todayStr,
       );
 
-      const shiftData = shiftRes.data.data;
-      const fmtTime = (raw: string | null): string => {
-        if (!raw) return '00:00';
-        const parts = raw.split(' ');
-        return parts[parts.length - 1].substring(0, 5);
-      };
+      if (aktifAssignment) {
+        const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifAssignment.shift_type);
+        if (detail) {
+          console.log(`[getActiveShift] ✓ via Shift Assignment: ${aktifAssignment.name}`);
+          return { success: true, source: 'assignment', ...detail };
+        }
+      }
 
-      return {
-        success:    true,
-        shift_name: aktif.shift_type,
-        start_time: fmtTime(shiftData.start_time),
-        end_time:   fmtTime(shiftData.end_time),
-      };
+      // ── Strategi 2: Shift Request (Approved) ─────────────────────
+      const reqRes = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Shift Request`, {
+          headers: { Authorization: authHeader },
+          params: {
+            filters: JSON.stringify([
+              ['employee',  '=',  employeeId],
+              ['from_date', '<=', todayStr],
+              ['status',    '=',  'Approved'],
+              ['docstatus', '=',  1],
+            ]),
+            fields:            JSON.stringify(['name', 'shift_type', 'from_date', 'to_date']),
+            order_by:          'from_date desc',
+            limit_page_length: 10,
+          },
+        }),
+      );
+
+      const requests: any[] = reqRes.data.data ?? [];
+      // to_date null = open-ended
+      const aktifRequest = requests.find(
+        (r) => !r.to_date || r.to_date >= todayStr,
+      );
+
+      if (aktifRequest) {
+        const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
+        if (detail) {
+          console.log(`[getActiveShift] ✓ via Shift Request: ${aktifRequest.name}`);
+          return { success: true, source: 'request', ...detail };
+        }
+      }
+
+      // ── Tidak ditemukan ───────────────────────────────────────────
+      console.warn(`[getActiveShift] Tidak ada shift aktif untuk ${employeeId} – ${todayStr}`);
+      return { success: false, message: 'Belum ada Shift. Silakan Ajukan Shift ke HRD.' };
+
     } catch (error: any) {
       console.error('[getActiveShift] Error:', error.response?.data || error.message);
       return { success: false, message: 'Gagal membaca Shift dari ERPNext.' };
@@ -626,6 +684,33 @@ export class AttendanceService {
       return { success: true, message: 'Berhasil.', data: response.data.data };
     } catch {
       throw new HttpException('Gagal mengajukan Shift Request.', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // GET SHIFT REQUEST HISTORY (Riwayat pengajuan shift karyawan)
+  // ─────────────────────────────────────────────────────────────────
+  async getShiftHistory(employeeId: string) {
+    const { erpUrl, authHeader } = this.getAuth();
+    try {
+      const res = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Shift Request`, {
+          headers: { Authorization: authHeader },
+          params: {
+            filters: JSON.stringify([['employee', '=', employeeId]]),
+            fields: JSON.stringify([
+              'name', 'shift_type', 'from_date', 'to_date',
+              'status', 'docstatus', 'creation',
+            ]),
+            order_by:          'creation desc',
+            limit_page_length: 20,
+          },
+        }),
+      );
+      return { success: true, data: res.data.data ?? [] };
+    } catch (error: any) {
+      console.error('[getShiftHistory] Error:', error.response?.data || error.message);
+      return { success: false, data: [], message: 'Gagal mengambil riwayat shift.' };
     }
   }
 }
