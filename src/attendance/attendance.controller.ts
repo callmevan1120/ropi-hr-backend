@@ -19,11 +19,10 @@ export class AttendanceController {
     return this.attendanceService.getHistory(employee_id, from, to);
   }
 
-  // 🔥 ENDPOINT BARU KHUSUS HR DASHBOARD (BISA FILTER HARIAN & BULANAN) 🔥
   @Get('all-history')
   async getAllHistory(
     @Query('from') from: string,
-    @Query('to') to: string
+    @Query('to') to: string,
   ) {
     return this.attendanceService.getAllHistory(from, to);
   }
@@ -43,13 +42,26 @@ export class AttendanceController {
     return this.attendanceService.submitLeaveRequest(body);
   }
 
-  // ENDPOINT RIWAYAT IZIN 
   @Get('leave-history')
   async getLeaveHistory(@Query('employee_id') employeeId: string) {
     return this.attendanceService.getLeaveHistory(employeeId);
   }
 
-  // PROXY FILE — hindari Mixed Content HTTPS vs HTTP 
+  @Get('active-shift')
+  async getActiveShift(@Query('employee_id') employeeId: string) {
+    return this.attendanceService.getActiveShift(employeeId);
+  }
+
+  @Get('hr-users')
+  async getHrUsers() {
+    return this.attendanceService.getHrUsers();
+  }
+
+  @Post('shift-request')
+  async submitShiftRequest(@Body() body: any) {
+    return this.attendanceService.submitShiftRequest(body);
+  }
+
   @Get('file')
   async getFile(@Query('path') filePath: string, @Res() res: any) {
     try {
@@ -60,7 +72,7 @@ export class AttendanceController {
       res.set('Content-Type', contentType);
       res.set('Cache-Control', 'public, max-age=86400');
       res.send(buffer);
-    } catch (err) {
+    } catch {
       res.status(404).json({ error: 'File not found' });
     }
   }
