@@ -10,6 +10,9 @@ export class AttendanceService {
     private readonly configService: ConfigService,
   ) {}
 
+  // ─────────────────────────────────────────────────────────────────
+  // HELPER: Auth header
+  // ─────────────────────────────────────────────────────────────────
   private getAuth() {
     const erpUrl    = this.configService.get<string>('ERPNEXT_URL')        ?? '';
     const apiKey    = this.configService.get<string>('ERPNEXT_API_KEY')    ?? '';
@@ -31,21 +34,6 @@ export class AttendanceService {
 
   // ─────────────────────────────────────────────────────────────────
   // HELPER: Normalisasi nama shift kantor ke format ERPNext
-  //
-  // Shift Type ERPNext (dari Shift_Type.xlsx):
-  //   "Senin - Kamis (PH Klaten Non Ramadhan)"  07:30–16:30
-  //   "Senin - Kamis (PH Klaten Ramadhan)"      07:00–15:30
-  //   "Jumat (PH Klaten Non Ramadhan)"           07:30–17:00
-  //   "Jumat (PH Klaten Ramadhan)"               07:00–16:00
-  //   (sama untuk Jakarta)
-  //
-  // Satpam TIDAK punya Shift Type terpisah di ERPNext.
-  // Jam Satpam (30 mnt lebih awal/lambat) hanya berlaku di tampilan frontend.
-  // Shift Assignment yang dibuat untuk Satpam tetap pakai nama shift kantor biasa.
-  //
-  // Format yang mungkin diterima dari frontend:
-  //   BARU (dengan kurung) : "Senin - Kamis (PH Klaten Non Ramadhan)"  ← sudah benar
-  //   LAMA (tanpa kurung)  : "Senin - Kamis PH Klaten Non Ramadhan"    ← perlu konversi
   // ─────────────────────────────────────────────────────────────────
   private normalizeOfficeShiftName(shiftName: string): string {
     if (!shiftName) return shiftName;
@@ -56,8 +44,6 @@ export class AttendanceService {
     // Jika sudah dalam format ERPNext (ada tanda kurung) → langsung return
     if (name.includes('(') && name.includes(')')) return name;
 
-    // Konversi format lama "Senin - Kamis PH Klaten Non Ramadhan"
-    // ke format baru  "Senin - Kamis (PH Klaten Non Ramadhan)"
     const isFriday   = /^jumat/i.test(name);
     const isRamadhan = /ramadhan/i.test(name);
     const isJakarta  = /jakarta/i.test(name);
@@ -105,15 +91,18 @@ export class AttendanceService {
               ['docstatus',   'in', [0, 1]], // Draft atau Submitted
             ]),
             fields:            JSON.stringify(['name', 'start_date', 'end_date', 'docstatus']),
-            limit_page_length: 5,
+            limit_page_length: 50,
           },
         }),
       );
 
       const assignments: any[] = res.data.data ?? [];
-      return assignments.some(
-        (a) => !a.end_date || a.end_date >= dateStr,
-      );
+      
+      // 🔥 REVISI: Eksplisit ngecek end_date
+      return assignments.some((a) => {
+        if (!a.end_date) return true;
+        return a.end_date >= dateStr;
+      });
     } catch {
       return false;
     }
@@ -121,11 +110,6 @@ export class AttendanceService {
 
   // ─────────────────────────────────────────────────────────────────
   // CORE: Buat dan Submit Shift Assignment otomatis
-  //
-  // Flow:
-  //  1. Cek apakah sudah ada Shift Assignment aktif yang cocok
-  //  2. Jika belum ada → buat (POST) → submit (PUT docstatus=1)
-  //  3. Return nama dokumen yang dibuat / sudah ada
   // ─────────────────────────────────────────────────────────────────
   private async ensureShiftAssignment(
     erpUrl: string,
@@ -180,7 +164,6 @@ export class AttendanceService {
     } catch (error: any) {
       const errMsg = JSON.stringify(error.response?.data || error.message);
       console.error('[ShiftAssignment] Gagal:', errMsg);
-      // Jangan throw – biarkan absensi tetap berjalan walau shift assignment gagal
       return { created: false, docName: null, error: errMsg };
     }
   }
@@ -214,16 +197,6 @@ export class AttendanceService {
 
   // ─────────────────────────────────────────────────────────────────
   // GET ACTIVE SHIFT
-  //
-  // Strategi berurutan (stop pada yang pertama berhasil):
-  //  1. Shift Assignment (docstatus=1, start_date <= hari ini,
-  //     end_date >= hari ini ATAU end_date kosong/null)
-  //  2. Shift Request (status=Approved, docstatus=1,
-  //     from_date <= hari ini, to_date >= hari ini ATAU kosong)
-  //
-  // Shift Request yang di-approve HRD di ERPNext kadang tidak
-  // otomatis menghasilkan Shift Assignment (tergantung konfigurasi),
-  // sehingga fallback ke Shift Request diperlukan.
   // ─────────────────────────────────────────────────────────────────
   async getActiveShift(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -242,16 +215,18 @@ export class AttendanceService {
             ]),
             fields:            JSON.stringify(['name', 'shift_type', 'start_date', 'end_date']),
             order_by:          'start_date desc',
-            limit_page_length: 10,
+            limit_page_length: 50,
           },
         }),
       );
 
       const assignments: any[] = assignRes.data.data ?? [];
-      // end_date null = open-ended (tidak ada batas akhir)
-      const aktifAssignment = assignments.find(
-        (a) => !a.end_date || a.end_date >= todayStr,
-      );
+      
+      // 🔥 REVISI: Logika filter end_date yang jauh lebih strict & eksplisit
+      const aktifAssignment = assignments.find((a) => {
+        if (!a.end_date) return true; // open-ended
+        return a.end_date >= todayStr;
+      });
 
       if (aktifAssignment) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifAssignment.shift_type);
@@ -262,6 +237,7 @@ export class AttendanceService {
       }
 
       // ── Strategi 2: Shift Request (Approved) ─────────────────────
+      // Jika HRD approve Shift Request tapi ERPNext tidak generate Assignment
       const reqRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Request`, {
           headers: { Authorization: authHeader },
@@ -274,16 +250,18 @@ export class AttendanceService {
             ]),
             fields:            JSON.stringify(['name', 'shift_type', 'from_date', 'to_date']),
             order_by:          'from_date desc',
-            limit_page_length: 10,
+            limit_page_length: 50,
           },
         }),
       );
 
       const requests: any[] = reqRes.data.data ?? [];
-      // to_date null = open-ended
-      const aktifRequest = requests.find(
-        (r) => !r.to_date || r.to_date >= todayStr,
-      );
+      
+      // 🔥 REVISI: Logika filter to_date yang jauh lebih strict & eksplisit
+      const aktifRequest = requests.find((r) => {
+        if (!r.to_date) return true; // open-ended
+        return r.to_date >= todayStr;
+      });
 
       if (aktifRequest) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
@@ -304,7 +282,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // CREATE CHECKIN  ← MAIN CHANGE: auto-create Shift Assignment
+  // CREATE CHECKIN
   // ─────────────────────────────────────────────────────────────────
   async createCheckin(data: any) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -322,16 +300,15 @@ export class AttendanceService {
       let shiftName: string = data.shift ?? '';
 
       if (shiftName && this.isOfficeShift(shiftName)) {
-        // Shift kantor: konversi ke format ERPNext dengan tanda kurung
         shiftName = this.normalizeOfficeShiftName(shiftName);
       }
-      // Shift outlet: gunakan apa adanya (sudah nama ERPNext)
 
       // ── Pastikan Shift Assignment ada & di-submit SEBELUM checkin ──
+      // Hal ini WAJIB dilakukan saat absen MASUK (IN) untuk menghindari "Off Shift"
       let shiftAssignmentInfo: { created: boolean; docName: string | null; error?: string } =
         { created: false, docName: null };
 
-      if (shiftName) {
+      if (logType === 'IN' && shiftName) {
         shiftAssignmentInfo = await this.ensureShiftAssignment(
           erpUrl, authHeader, data.employee_id, shiftName, todayStr,
         );
@@ -342,8 +319,6 @@ export class AttendanceService {
             `Absensi tetap dilanjutkan. Error: ${shiftAssignmentInfo.error}`,
           );
         }
-      } else {
-        console.warn('[Checkin] shift kosong – skip pembuatan Shift Assignment.');
       }
 
       // ── Kirim Employee Checkin ke ERPNext ──────────────────────
@@ -413,7 +388,7 @@ export class AttendanceService {
       );
       return { success: true, data: response.data.data };
     } catch {
-      throw new HttpException('Gagal mengambil riwayat absen.', HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException('Gagal mengambil riwayat absen dari ERPNext.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -434,17 +409,16 @@ export class AttendanceService {
             ]),
             fields: JSON.stringify([
               'name', 'employee', 'employee_name', 'log_type', 'time',
-              'custom_foto_absen', 'custom_verification_image', 'custom_signature', 'shift',
-              'latitude', 'longitude',
+              'custom_foto_absen', 'custom_signature', 'shift',
             ]),
             order_by:          'time desc',
-            limit_page_length: 5000,
+            limit_page_length: 500,
           },
         }),
       );
       return { success: true, data: response.data.data };
     } catch {
-      throw new HttpException('Gagal mengambil semua data absen.', HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException('Gagal mengambil semua riwayat absen.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -466,10 +440,13 @@ export class AttendanceService {
       );
       return { success: true, data: response.data.data };
     } catch {
-      throw new HttpException('Gagal menarik Shift.', HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException('Gagal mengambil daftar Shift dari ERPNext.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
+  // ─────────────────────────────────────────────────────────────────
+  // GET LEAVE TYPES
+  // ─────────────────────────────────────────────────────────────────
   async getLeaveTypes() {
     const { erpUrl, authHeader } = this.getAuth();
 
@@ -485,12 +462,16 @@ export class AttendanceService {
       );
       return { success: true, data: response.data.data };
     } catch {
-      throw new HttpException('Gagal menarik Tipe Izin.', HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException('Gagal mengambil daftar Tipe Izin dari ERPNext.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
+  // ─────────────────────────────────────────────────────────────────
+  // PROXY FILE (untuk foto bukti izin)
+  // ─────────────────────────────────────────────────────────────────
   async proxyFile(filePath: string): Promise<{ buffer: Buffer; contentType: string }> {
     const { erpUrl, authHeader } = this.getAuth();
+
     const url      = `${erpUrl}${filePath}`;
     const response = await firstValueFrom(
       this.httpService.get(url, {
@@ -498,10 +479,14 @@ export class AttendanceService {
         responseType: 'arraybuffer',
       }),
     );
+
     const contentType = response.headers['content-type'] || 'image/jpeg';
     return { buffer: Buffer.from(response.data), contentType };
   }
 
+  // ─────────────────────────────────────────────────────────────────
+  // GET LEAVE HISTORY
+  // ─────────────────────────────────────────────────────────────────
   async getLeaveHistory(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
 
@@ -511,7 +496,10 @@ export class AttendanceService {
           headers: { Authorization: authHeader },
           params: {
             filters:           JSON.stringify([['employee', '=', employeeId]]),
-            fields:            JSON.stringify(['name', 'leave_type', 'from_date', 'to_date', 'description', 'status', 'total_leave_days']),
+            fields:            JSON.stringify([
+              'name', 'leave_type', 'from_date', 'to_date',
+              'description', 'status', 'total_leave_days',
+            ]),
             order_by:          'from_date desc',
             limit_page_length: 50,
           },
@@ -527,9 +515,9 @@ export class AttendanceService {
         this.httpService.get(`${erpUrl}/api/resource/File`, {
           headers: { Authorization: authHeader },
           params: {
-            filters:           JSON.stringify([
+            filters: JSON.stringify([
               ['attached_to_doctype', '=',  'Leave Application'],
-              ['attached_to_name',    'in',  docNames],
+              ['attached_to_name',    'in', docNames],
             ]),
             fields:            JSON.stringify(['name', 'file_url', 'attached_to_name']),
             limit_page_length: 200,
@@ -539,47 +527,68 @@ export class AttendanceService {
 
       const attachmentMap: Record<string, string> = {};
       for (const file of fileRes.data.data ?? []) {
-        if (!attachmentMap[file.attached_to_name]) attachmentMap[file.attached_to_name] = file.file_url;
+        if (!attachmentMap[file.attached_to_name]) {
+          attachmentMap[file.attached_to_name] = file.file_url;
+        }
       }
 
       const result = leaveList.map((leave) => ({
         ...leave,
         attachment: attachmentMap[leave.name] ?? null,
       }));
+
       return { success: true, data: result };
     } catch {
-      throw new HttpException('Gagal menarik izin.', HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException('Gagal mengambil riwayat izin dari ERPNext.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
+  // ─────────────────────────────────────────────────────────────────
+  // SUBMIT LEAVE REQUEST
+  // ─────────────────────────────────────────────────────────────────
   async submitLeaveRequest(data: any) {
     const { erpUrl, authHeader } = this.getAuth();
+
     try {
       const payload = {
-        employee:    data.employee_id,
-        leave_type:  data.leave_type,
-        from_date:   data.from_date,
-        to_date:     data.to_date,
+        employee:   data.employee_id,
+        leave_type: data.leave_type,
+        from_date:  data.from_date,
+        to_date:    data.to_date,
         description: data.reason,
-        status:      'Open',
-        docstatus:   0,
+        status:     'Open',
+        docstatus:  0,
       };
 
       const response = await firstValueFrom(
-        this.httpService.post(`${erpUrl}/api/resource/Leave Application`, payload, {
-          headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
-        }),
+        this.httpService.post(
+          `${erpUrl}/api/resource/Leave Application`,
+          payload,
+          {
+            headers: {
+              Authorization:  authHeader,
+              'Content-Type': 'application/json',
+              Accept:         'application/json',
+            },
+          },
+        ),
       );
 
       const docName = response.data.data.name;
 
       if (docName && data.attachment) {
         try {
-          const matches = data.attachment.match(/^data:([A-Za-z0-9+\/]+\/[A-Za-z0-9+\/]+);base64,(.+)$/);
-          if (!matches) throw new Error('Format base64 salah');
+          const matches = data.attachment.match(
+            /^data:([A-Za-z0-9+\/]+\/[A-Za-z0-9+\/]+);base64,(.+)$/,
+          );
+          if (!matches) throw new Error('Format base64 tidak valid dari frontend');
+
           const mimeType   = matches[1];
           const fileBuffer = Buffer.from(matches[2], 'base64');
-          const extMap: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png' };
+          const extMap: Record<string, string> = {
+            'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png',
+            'image/gif':  'gif', 'image/webp': 'webp', 'application/pdf': 'pdf',
+          };
           const ext          = extMap[mimeType] ?? 'jpg';
           const safeFileName = `Bukti_${docName.replace(/-/g, '_')}.${ext}`;
           const boundary     = `----FormBoundary${Date.now()}`;
@@ -588,25 +597,21 @@ export class AttendanceService {
             `--${boundary}`,
             `Content-Disposition: form-data; name="file"; filename="${safeFileName}"`,
             `Content-Type: ${mimeType}`,
-            '',
-            '',
+            '', '',
           ].join('\r\n');
+
           const afterFile = [
             '',
             `--${boundary}`,
             `Content-Disposition: form-data; name="is_private"`,
-            '',
-            '0',
+            '', '0',
             `--${boundary}`,
             `Content-Disposition: form-data; name="doctype"`,
-            '',
-            'Leave Application',
+            '', 'Leave Application',
             `--${boundary}`,
             `Content-Disposition: form-data; name="docname"`,
-            '',
-            docName,
-            `--${boundary}--`,
-            '',
+            '', docName,
+            `--${boundary}--`, '',
           ].join('\r\n');
 
           const bodyBuffer = Buffer.concat([
@@ -624,30 +629,43 @@ export class AttendanceService {
               },
             }),
           );
-        } catch (e: any) {
-          console.error('Upload Gagal:', e.message);
+        } catch (fileErr: any) {
+          console.error('[Upload Gagal] Izin tersimpan, lampiran gagal:', fileErr.message);
         }
       }
-      return { success: true, message: 'Berhasil.', data: response.data.data };
+
+      return {
+        success: true,
+        message: 'Izin berhasil diajukan beserta buktinya',
+        data:    response.data.data,
+      };
     } catch (error: any) {
       const errorString = JSON.stringify(error.response?.data || {});
-      if (errorString.includes('Overlap'))    throw new HttpException('Sudah ada izin.', HttpStatus.BAD_REQUEST);
-      else if (errorString.includes('allocation')) throw new HttpException('Kuota habis.', HttpStatus.BAD_REQUEST);
-      else throw new HttpException('Gagal submit izin.', HttpStatus.INTERNAL_SERVER_ERROR);
+
+      if (errorString.includes('Overlap')) {
+        throw new HttpException('Gagal: Sudah ada izin di tanggal tersebut.', HttpStatus.BAD_REQUEST);
+      } else if (errorString.includes('allocation')) {
+        throw new HttpException('Gagal: Kuota izin tidak mencukupi.', HttpStatus.BAD_REQUEST);
+      } else {
+        throw new HttpException('Gagal menyimpan pengajuan izin.', HttpStatus.INTERNAL_SERVER_ERROR);
+      }
     }
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET HR USERS
+  // GET HR USERS (untuk approver shift request)
   // ─────────────────────────────────────────────────────────────────
   async getHrUsers() {
     const { erpUrl, authHeader } = this.getAuth();
+
     try {
       const response = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/User`, {
           headers: { Authorization: authHeader },
           params: {
-            filters:           JSON.stringify([['role_profile_name', 'like', '%HR%']]),
+            filters: JSON.stringify([
+              ['role_profile_name', 'like', '%HR%'],
+            ]),
             fields:            JSON.stringify(['name', 'email', 'full_name']),
             limit_page_length: 20,
           },
@@ -661,28 +679,32 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // SUBMIT SHIFT REQUEST
+  // SUBMIT SHIFT REQUEST (pengajuan tukar shift oleh karyawan)
   // ─────────────────────────────────────────────────────────────────
   async submitShiftRequest(data: any) {
     const { erpUrl, authHeader } = this.getAuth();
+
     try {
       const payload = {
-        employee:   data.employee_id,
-        shift_type: data.shift_type,
-        from_date:  data.from_date,
-        to_date:    data.to_date,
-        approver:   data.approver,
-        status:     'Draft',
-        docstatus:  0,
+        employee:        data.employee_id,
+        shift_type:      data.shift_type,
+        from_date:       data.from_date,
+        to_date:         data.to_date,
+        approver:        data.approver,
+        status:          'Draft',
+        docstatus:       0,
       };
 
       const response = await firstValueFrom(
-        this.httpService.post(`${erpUrl}/api/resource/Shift Request`, payload, {
-          headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
-        }),
+        this.httpService.post(
+          `${erpUrl}/api/resource/Shift Request`,
+          payload,
+          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+        ),
       );
-      return { success: true, message: 'Berhasil.', data: response.data.data };
-    } catch {
+
+      return { success: true, message: 'Shift Request berhasil diajukan ke HRD.', data: response.data.data };
+    } catch (error: any) {
       throw new HttpException('Gagal mengajukan Shift Request.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
