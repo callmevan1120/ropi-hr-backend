@@ -1,26 +1,67 @@
 import { Controller, Get, Param } from '@nestjs/common';
-
-// Data langsung ditempel di sini, jadi nggak perlu baca-baca file json lagi!
-const dataLokasi = [
-  { branch: "Kantor Pusat", nama: "PH Klaten", lat: -7.6150, lng: 110.6870, radius: 100 },
-  { branch: "Kantor Cabang 2", nama: "Kantor Cabang Semarang Barat", lat: -6.9824, lng: 110.3900, radius: 100 },
-  { branch: "Outlet Banyumanik", nama: "Outlet Banyumanik", lat: -7.0734, lng: 110.4180, radius: 80 }
-];
+import { HttpService } from '@nestjs/axios';
+import { ConfigService } from '@nestjs/config';
+import { firstValueFrom } from 'rxjs';
 
 @Controller('api/locations')
 export class LocationsController {
-  
+  constructor(
+    private readonly httpService: HttpService,
+    private readonly configService: ConfigService,
+  ) {}
+
+  // ─────────────────────────────────────────────────────────
+  // TARIK DATA LANGSUNG DARI ERPNEXT (Doctype: Shift Location)
+  // ─────────────────────────────────────────────────────────
+  private async fetchLocationsFromERP() {
+    const erpUrl = this.configService.get<string>('ERPNEXT_URL') ?? '';
+    const apiKey = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
+    const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
+
+    try {
+      const response = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Shift Location`, {
+          headers: { Authorization: `token ${apiKey}:${apiSecret}` },
+          params: {
+            fields: JSON.stringify(['name', 'latitude', 'longitude', 'checkin_radius']),
+            limit_page_length: 100, // Menarik maksimal 100 lokasi outlet/kantor
+          },
+        })
+      );
+
+      // Memetakan data dari ERPNext ke format yang dibutuhkan aplikasi (Frontend)
+      return response.data.data.map((loc: any) => ({
+        nama: loc.name,
+        lat: Number(loc.latitude) || 0,
+        lng: Number(loc.longitude) || 0,
+        radius: Number(loc.checkin_radius) || 100,
+      }));
+    } catch (error) {
+      console.error('Gagal mengambil Shift Location dari ERPNext:', error);
+      return [];
+    }
+  }
+
   @Get()
-  getAllLocations() {
-    return { success: true, locations: dataLokasi };
+  async getAllLocations() {
+    const locations = await this.fetchLocationsFromERP();
+    return { success: true, locations };
   }
 
   @Get(':branch')
-  getLocationByBranch(@Param('branch') branch: string) {
-    const filtered = dataLokasi.filter(loc => loc.branch === branch);
+  async getLocationByBranch(@Param('branch') branch: string) {
+    const locations = await this.fetchLocationsFromERP();
+    
+    // Cari lokasi yang namanya mengandung kata kunci branch
+    const filtered = locations.filter((loc: any) => 
+      loc.nama.toLowerCase().includes(branch.toLowerCase())
+    );
+
     if (filtered.length > 0) {
       return { success: true, locations: filtered };
     }
-    return { success: true, locations: dataLokasi };
+    
+    // Fallback: Jika tidak ketemu spesifik, kembalikan semua
+    return { success: true, locations };
   }
 }
