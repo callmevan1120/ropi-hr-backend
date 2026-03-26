@@ -37,11 +37,7 @@ export class AttendanceService {
   // ─────────────────────────────────────────────────────────────────
   private normalizeOfficeShiftName(shiftName: string): string {
     if (!shiftName) return shiftName;
-
-    // Strip label Satpam jika ada (Satpam tidak punya shift terpisah di ERPNext)
     let name = shiftName.trim().replace(/\s+Satpam\s*$/i, '').trim();
-
-    // Jika sudah dalam format ERPNext (ada tanda kurung) → langsung return
     if (name.includes('(') && name.includes(')')) return name;
 
     const isFriday   = /^jumat/i.test(name);
@@ -88,7 +84,7 @@ export class AttendanceService {
               ['employee',    '=',  employeeId],
               ['shift_type',  '=',  shiftType],
               ['start_date',  '<=', dateStr],
-              ['docstatus',   'in', [0, 1]], // Draft atau Submitted
+              ['docstatus',   'in', [0, 1]],
             ]),
             fields:            JSON.stringify(['name', 'start_date', 'end_date', 'docstatus']),
             limit_page_length: 50,
@@ -97,8 +93,6 @@ export class AttendanceService {
       );
 
       const assignments: any[] = res.data.data ?? [];
-      
-      // 🔥 REVISI: Eksplisit ngecek end_date
       return assignments.some((a) => {
         if (!a.end_date) return true;
         return a.end_date >= dateStr;
@@ -119,22 +113,17 @@ export class AttendanceService {
     dateStr: string,
   ): Promise<{ created: boolean; docName: string | null; error?: string }> {
     try {
-      // 1. Cek existing
       const alreadyExists = await this.hasExistingShiftAssignment(
         erpUrl, authHeader, employeeId, shiftType, dateStr,
       );
 
-      if (alreadyExists) {
-        console.log(`[ShiftAssignment] Sudah ada untuk ${employeeId} – ${shiftType} – ${dateStr}`);
-        return { created: false, docName: null };
-      }
+      if (alreadyExists) return { created: false, docName: null };
 
-      // 2. Buat Shift Assignment (docstatus=0 = Draft)
       const createPayload = {
         employee:   employeeId,
         shift_type: shiftType,
         start_date: dateStr,
-        end_date:   dateStr,   // Hanya 1 hari
+        end_date:   dateStr, 
         docstatus:  0,
       };
 
@@ -147,9 +136,7 @@ export class AttendanceService {
       );
 
       const docName: string = createRes.data.data.name;
-      console.log(`[ShiftAssignment] Dibuat: ${docName}`);
 
-      // 3. Submit (docstatus=1) agar ERPNext mengenali sebagai shift aktif
       await firstValueFrom(
         this.httpService.put(
           `${erpUrl}/api/resource/Shift Assignment/${encodeURIComponent(docName)}`,
@@ -158,9 +145,7 @@ export class AttendanceService {
         ),
       );
 
-      console.log(`[ShiftAssignment] Submitted: ${docName}`);
       return { created: true, docName };
-
     } catch (error: any) {
       const errMsg = JSON.stringify(error.response?.data || error.message);
       console.error('[ShiftAssignment] Gagal:', errMsg);
@@ -203,7 +188,6 @@ export class AttendanceService {
     const todayStr = this.getTodayWib();
 
     try {
-      // ── Strategi 1: Shift Assignment ─────────────────────────────
       const assignRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Assignment`, {
           headers: { Authorization: authHeader },
@@ -221,23 +205,16 @@ export class AttendanceService {
       );
 
       const assignments: any[] = assignRes.data.data ?? [];
-      
-      // 🔥 REVISI: Logika filter end_date yang jauh lebih strict & eksplisit
       const aktifAssignment = assignments.find((a) => {
-        if (!a.end_date) return true; // open-ended
+        if (!a.end_date) return true; 
         return a.end_date >= todayStr;
       });
 
       if (aktifAssignment) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifAssignment.shift_type);
-        if (detail) {
-          console.log(`[getActiveShift] ✓ via Shift Assignment: ${aktifAssignment.name}`);
-          return { success: true, source: 'assignment', ...detail };
-        }
+        if (detail) return { success: true, source: 'assignment', ...detail };
       }
 
-      // ── Strategi 2: Shift Request (Approved) ─────────────────────
-      // Jika HRD approve Shift Request tapi ERPNext tidak generate Assignment
       const reqRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Request`, {
           headers: { Authorization: authHeader },
@@ -256,28 +233,84 @@ export class AttendanceService {
       );
 
       const requests: any[] = reqRes.data.data ?? [];
-      
-      // 🔥 REVISI: Logika filter to_date yang jauh lebih strict & eksplisit
       const aktifRequest = requests.find((r) => {
-        if (!r.to_date) return true; // open-ended
+        if (!r.to_date) return true; 
         return r.to_date >= todayStr;
       });
 
       if (aktifRequest) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
-        if (detail) {
-          console.log(`[getActiveShift] ✓ via Shift Request: ${aktifRequest.name}`);
-          return { success: true, source: 'request', ...detail };
-        }
+        if (detail) return { success: true, source: 'request', ...detail };
       }
 
-      // ── Tidak ditemukan ───────────────────────────────────────────
-      console.warn(`[getActiveShift] Tidak ada shift aktif untuk ${employeeId} – ${todayStr}`);
       return { success: false, message: 'Belum ada Shift. Silakan Ajukan Shift ke HRD.' };
 
     } catch (error: any) {
-      console.error('[getActiveShift] Error:', error.response?.data || error.message);
       return { success: false, message: 'Gagal membaca Shift dari ERPNext.' };
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // 🔥 KEJAIBAN: UPLOAD BASE64 MENJADI FILE FISIK KE ERPNEXT 🔥
+  // ─────────────────────────────────────────────────────────────────
+  private async uploadBase64ToERPNext(
+    erpUrl: string,
+    authHeader: string,
+    base64Data: string | undefined | null,
+    fileNamePrefix: string,
+  ): Promise<string | null> {
+    if (!base64Data || !base64Data.startsWith('data:image')) return null;
+
+    try {
+      const matches = base64Data.match(/^data:([A-Za-z0-9+\/]+\/[A-Za-z0-9+\/]+);base64,(.+)$/);
+      if (!matches) return null;
+
+      const mimeType = matches[1];
+      const fileBuffer = Buffer.from(matches[2], 'base64');
+      const extMap: Record<string, string> = {
+        'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png',
+        'image/gif': 'gif', 'image/webp': 'webp',
+      };
+      const ext = extMap[mimeType] ?? 'jpg';
+      const safeFileName = `${fileNamePrefix}_${Date.now()}.${ext}`;
+      const boundary = `----FormBoundary${Date.now()}`;
+
+      const beforeFile = [
+        `--${boundary}`,
+        `Content-Disposition: form-data; name="file"; filename="${safeFileName}"`,
+        `Content-Type: ${mimeType}`,
+        '', '',
+      ].join('\r\n');
+
+      const afterFile = [
+        '',
+        `--${boundary}`,
+        `Content-Disposition: form-data; name="is_private"`,
+        '', '0',
+        `--${boundary}--`, '',
+      ].join('\r\n');
+
+      const bodyBuffer = Buffer.concat([
+        Buffer.from(beforeFile, 'utf-8'),
+        fileBuffer,
+        Buffer.from(afterFile, 'utf-8'),
+      ]);
+
+      const res = await firstValueFrom(
+        this.httpService.post(`${erpUrl}/api/method/upload_file`, bodyBuffer, {
+          headers: {
+            Authorization: authHeader,
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': bodyBuffer.length.toString(),
+          },
+        }),
+      );
+
+      // Mengembalikan URL fisik dari ERPNext, misal: "/files/Absen_Karyawan_123.jpg"
+      return res.data.message.file_url;
+    } catch (err: any) {
+      console.error(`[Upload File Gagal untuk ${fileNamePrefix}]:`, err.message);
+      return null;
     }
   }
 
@@ -296,15 +329,11 @@ export class AttendanceService {
       const inputTipe = (data.tipe || data.log_type || '').toUpperCase();
       const logType   = (inputTipe === 'KELUAR' || inputTipe === 'OUT') ? 'OUT' : 'IN';
 
-      // ── Normalisasi nama shift ──────────────────────────────────
       let shiftName: string = data.shift ?? '';
-
       if (shiftName && this.isOfficeShift(shiftName)) {
         shiftName = this.normalizeOfficeShiftName(shiftName);
       }
 
-      // ── Pastikan Shift Assignment ada & di-submit SEBELUM checkin ──
-      // Hal ini WAJIB dilakukan saat absen MASUK (IN) untuk menghindari "Off Shift"
       let shiftAssignmentInfo: { created: boolean; docName: string | null; error?: string } =
         { created: false, docName: null };
 
@@ -312,25 +341,23 @@ export class AttendanceService {
         shiftAssignmentInfo = await this.ensureShiftAssignment(
           erpUrl, authHeader, data.employee_id, shiftName, todayStr,
         );
-
-        if (shiftAssignmentInfo.error) {
-          console.warn(
-            `[Checkin] Shift Assignment gagal dibuat untuk ${data.employee_id}. ` +
-            `Absensi tetap dilanjutkan. Error: ${shiftAssignmentInfo.error}`,
-          );
-        }
       }
 
-      // ── Kirim Employee Checkin ke ERPNext ──────────────────────
+      // 🔥 UPLOAD FOTO BASE64 MENJADI FILE FISIK SEBELUM DISIMPAN KE DATABASE 🔥
+      const fotoAbsenUrl = await this.uploadBase64ToERPNext(erpUrl, authHeader, data.image_verification, `Absen_${data.employee_id}_Depan`);
+      const fotoKiriUrl  = await this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_verification_image, `Absen_${data.employee_id}_Kiri`);
+      const ttdUrl       = await this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_signature, `Absen_${data.employee_id}_TTD`);
+
+      // ── Kirim Employee Checkin ke ERPNext menggunakan URL (Bukan Base64) ──
       const payload: any = {
         employee:                  data.employee_id,
         log_type:                  logType,
         time:                      timeString,
         latitude:                  data.latitude,
         longitude:                 data.longitude,
-        custom_foto_absen:         data.image_verification,
-        custom_verification_image: data.custom_verification_image,
-        custom_signature:          data.custom_signature,
+        custom_foto_absen:         fotoAbsenUrl || data.image_verification, // Gunakan URL, jika gagal fallback ke base64
+        custom_verification_image: fotoKiriUrl || data.custom_verification_image,
+        custom_signature:          ttdUrl || data.custom_signature,
         shift:                     shiftName,
         device_id:                 'RopiHR-PWA',
       };
