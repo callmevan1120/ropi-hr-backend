@@ -379,7 +379,7 @@ export class AttendanceService {
             fields: JSON.stringify([
               'name', 'employee', 'log_type', 'time',
               'custom_foto_absen', 'custom_signature', 'shift',
-              'custom_verification_image',
+              'custom_verification_image', 'latitude', 'longitude',
             ]),
             order_by:          'time desc',
             limit_page_length: 100,
@@ -410,6 +410,7 @@ export class AttendanceService {
             fields: JSON.stringify([
               'name', 'employee', 'employee_name', 'log_type', 'time',
               'custom_foto_absen', 'custom_signature', 'shift',
+              'latitude', 'longitude',
             ]),
             order_by:          'time desc',
             limit_page_length: 500,
