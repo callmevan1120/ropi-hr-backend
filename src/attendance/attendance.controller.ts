@@ -47,16 +47,22 @@ export class AttendanceController {
     return this.attendanceService.cancelLeaveRequest(id);
   }
 
-  // 🔥 ENDPOINT BARU UNTUK APPROVE IZIN 🔥
+  // ENDPOINT BARU: APPROVE IZIN
   @Patch('leave-request/:id/approve')
   async approveLeaveRequest(@Param('id') id: string) {
     return this.attendanceService.updateLeaveStatus(id, 'Approved');
   }
 
-  // 🔥 ENDPOINT BARU UNTUK REJECT IZIN 🔥
+  // ENDPOINT BARU: REJECT IZIN
   @Patch('leave-request/:id/reject')
   async rejectLeaveRequest(@Param('id') id: string) {
     return this.attendanceService.updateLeaveStatus(id, 'Rejected');
+  }
+
+  // ENDPOINT BARU: GET ALL LEAVE REQUESTS (Untuk Kelola Izin HRD) 
+  @Get('all-leave-requests')
+  async getAllLeaveRequests() {
+    return this.attendanceService.getAllLeaveRequests();
   }
 
   @Get('leave-history')

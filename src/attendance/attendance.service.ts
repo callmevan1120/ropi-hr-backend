@@ -251,7 +251,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // 🔥 KEJAIBAN: UPLOAD BASE64 MENJADI FILE FISIK KE ERPNEXT 🔥
+  // UPLOAD BASE64 MENJADI FILE FISIK KE ERPNEXT
   // ─────────────────────────────────────────────────────────────────
   private async uploadBase64ToERPNext(
     erpUrl: string,
@@ -306,7 +306,6 @@ export class AttendanceService {
         }),
       );
 
-      // Mengembalikan URL fisik dari ERPNext, misal: "/files/Absen_Karyawan_123.jpg"
       return res.data.message.file_url;
     } catch (err: any) {
       console.error(`[Upload File Gagal untuk ${fileNamePrefix}]:`, err.message);
@@ -343,19 +342,18 @@ export class AttendanceService {
         );
       }
 
-      // 🔥 UPLOAD FOTO BASE64 MENJADI FILE FISIK SEBELUM DISIMPAN KE DATABASE 🔥
+      // UPLOAD FOTO BASE64 MENJADI FILE FISIK SEBELUM DISIMPAN KE DATABASE
       const fotoAbsenUrl = await this.uploadBase64ToERPNext(erpUrl, authHeader, data.image_verification, `Absen_${data.employee_id}_Depan`);
       const fotoKiriUrl  = await this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_verification_image, `Absen_${data.employee_id}_Kiri`);
       const ttdUrl       = await this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_signature, `Absen_${data.employee_id}_TTD`);
 
-      // ── Kirim Employee Checkin ke ERPNext menggunakan URL (Bukan Base64) ──
       const payload: any = {
         employee:                  data.employee_id,
         log_type:                  logType,
         time:                      timeString,
         latitude:                  data.latitude,
         longitude:                 data.longitude,
-        custom_foto_absen:         fotoAbsenUrl || data.image_verification, // Gunakan URL, jika gagal fallback ke base64
+        custom_foto_absen:         fotoAbsenUrl || data.image_verification, 
         custom_verification_image: fotoKiriUrl || data.custom_verification_image,
         custom_signature:          ttdUrl || data.custom_signature,
         shift:                     shiftName,
@@ -571,6 +569,62 @@ export class AttendanceService {
     }
   }
 
+  // FUNGSI BARU: GET ALL LEAVE REQUESTS
+  async getAllLeaveRequests() {
+    const { erpUrl, authHeader } = this.getAuth();
+    try {
+      const res = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Leave Application`, {
+          headers: { Authorization: authHeader },
+          params: {
+            fields: JSON.stringify([
+              'name', 'employee', 'employee_name', 'leave_type', 'from_date', 'to_date',
+              'description', 'status', 'total_leave_days'
+            ]),
+            order_by: 'creation desc',
+            limit_page_length: 500,
+          },
+        }),
+      );
+      
+      const leaveList: any[] = res.data.data ?? [];
+      if (leaveList.length === 0) return { success: true, data: [] };
+
+      // Cari file attachment untuk tiap izin
+      const docNames = leaveList.map((l) => l.name);
+      const fileRes = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/File`, {
+          headers: { Authorization: authHeader },
+          params: {
+            filters: JSON.stringify([
+              ['attached_to_doctype', '=',  'Leave Application'],
+              ['attached_to_name',    'in', docNames],
+            ]),
+            fields: JSON.stringify(['name', 'file_url', 'attached_to_name']),
+            limit_page_length: 500,
+          },
+        }),
+      );
+
+      const attachmentMap: Record<string, string> = {};
+      for (const file of fileRes.data.data ?? []) {
+        if (!attachmentMap[file.attached_to_name]) {
+          attachmentMap[file.attached_to_name] = file.file_url;
+        }
+      }
+
+      const result = leaveList.map((leave) => ({
+        ...leave,
+        attachment: attachmentMap[leave.name] ?? null,
+      }));
+
+      return { success: true, data: result };
+    } catch (error: any) {
+      console.error('[getAllLeaveRequests] Error:', error.response?.data || error.message);
+      return { success: false, data: [], message: 'Gagal mengambil semua data izin' };
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // SUBMIT LEAVE REQUEST
   // ─────────────────────────────────────────────────────────────────
@@ -771,7 +825,6 @@ export class AttendanceService {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
-      // 1. Cek status dulu — hanya boleh cancel kalau masih Open (docstatus=0)
       const checkRes = await firstValueFrom(
         this.httpService.get(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
@@ -787,7 +840,6 @@ export class AttendanceService {
         );
       }
 
-      // 2. Delete dokumen (hanya bisa kalau docstatus=0 / Draft)
       await firstValueFrom(
         this.httpService.delete(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
@@ -809,7 +861,7 @@ export class AttendanceService {
     }
   }
 
-  // 🔥 FUNGSI BARU UNTUK UPDATE STATUS IZIN (APPROVE / REJECT) 🔥
+  // FUNGSI BARU: UPDATE STATUS IZIN (APPROVE / REJECT)
   async updateLeaveStatus(docName: string, status: 'Approved' | 'Rejected') {
     const { erpUrl, authHeader } = this.getAuth();
     try {
