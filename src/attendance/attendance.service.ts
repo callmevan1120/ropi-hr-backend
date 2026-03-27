@@ -632,14 +632,18 @@ export class AttendanceService {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
+      const hrRes = await this.getHrUsers();
+      const defaultApprover = (hrRes.success && hrRes.data.length > 0) ? hrRes.data[0] : 'Administrator';
+
       const payload = {
-        employee:   data.employee_id,
-        leave_type: data.leave_type,
-        from_date:  data.from_date,
-        to_date:    data.to_date,
-        description: data.reason,
-        status:     'Open',
-        docstatus:  0,
+        employee:       data.employee_id,
+        leave_type:     data.leave_type,
+        from_date:      data.from_date,
+        to_date:        data.to_date,
+        description:    data.reason,
+        leave_approver: defaultApprover, 
+        status:         'Open',
+        docstatus:      0,
       };
 
       const response = await firstValueFrom(
@@ -861,10 +865,11 @@ export class AttendanceService {
     }
   }
 
-  // FUNGSI UPDATE STATUS IZIN (APPROVE / REJECT) DALAM 1 REQUEST
+  // FUNGSI UPDATE STATUS IZIN (APPROVE / REJECT) - 2 TAHAP
   async updateLeaveStatus(docName: string, status: 'Approved' | 'Rejected') {
     const { erpUrl, authHeader } = this.getAuth();
     try {
+      // 1. Ambil data dokumen saat ini
       const getRes = await firstValueFrom(
         this.httpService.get(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
@@ -879,15 +884,20 @@ export class AttendanceService {
         approver = hrRes.success && hrRes.data.length > 0 ? hrRes.data[0] : 'Administrator';
       }
 
-      // KIRIM SEMUANYA DALAM 1 KALI TEMBAKAN agar status tidak tereset ke "Open"
+      // TAHAP 1: SIMPAN DRAFT (Ubah Status ke Approved/Rejected) 
       await firstValueFrom(
         this.httpService.put(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
-          { 
-            status: status, 
-            leave_approver: approver, 
-            docstatus: 1 
-          },
+          { status: status, leave_approver: approver },
+          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+        ),
+      );
+
+      // TAHAP 2: SUBMIT DOKUMEN (Ubah docstatus jadi 1) 
+      await firstValueFrom(
+        this.httpService.put(
+          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
+          { docstatus: 1 },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
         ),
       );
