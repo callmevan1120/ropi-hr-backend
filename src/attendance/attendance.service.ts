@@ -932,13 +932,23 @@ export class AttendanceService {
         ),
       );
 
-      // LANGKAH 3: Submit via frappe.client.submit — ini cara resmi Frappe untuk submit dokumen.
-      // Endpoint ini membaca ulang dokumen dari DB (sudah berisi status yang benar dari langkah 2),
-      // lalu menjalankan on_submit() dengan field status yang sudah tersimpan.
+      // LANGKAH 3: GET ulang dokumen untuk mendapatkan `modified` timestamp terbaru.
+      // Frappe menggunakan optimistic locking — frappe.client.submit akan menolak
+      // jika timestamp dokumen yang dikirim tidak cocok dengan yang ada di DB.
+      // PUT di langkah 2 mengubah `modified`, jadi kita harus fetch ulang dulu.
+      const refreshRes = await firstValueFrom(
+        this.httpService.get(
+          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
+          { headers: { Authorization: authHeader } },
+        ),
+      );
+      const freshDoc = refreshRes.data.data;
+
+      // LANGKAH 4: Submit via frappe.client.submit dengan dokumen lengkap + timestamp terbaru.
       await firstValueFrom(
         this.httpService.post(
           `${erpUrl}/api/method/frappe.client.submit`,
-          { doc: { doctype: 'Leave Application', name: docName } },
+          { doc: { ...freshDoc, doctype: 'Leave Application' } },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
         ),
       );
