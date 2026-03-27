@@ -17,7 +17,7 @@ export class LeavesService {
     const headers = { Authorization: `token ${apiKey}:${apiSecret}` };
 
     try {
-      // 1. Ambil Riwayat Pengajuan (Field standar biasanya aman)
+      // 1. Ambil Riwayat Pengajuan Cuti Karyawan
       const historyRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Leave Application`, {
           headers,
@@ -30,8 +30,7 @@ export class LeavesService {
         })
       );
 
-      // 2. Cari ID (Name) Dokumen Alokasi
-      // Kita hanya memanggil field 'name' agar tidak memicu DataError
+      // 2. Ambil Jatah Awal (12 Hari) dari Dokumen Leave Allocation
       const findAlloc = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Leave Allocation`, {
           headers,
@@ -39,41 +38,59 @@ export class LeavesService {
             filters: JSON.stringify([
               ['employee', '=', employeeId],
               ['leave_type', '=', 'Cuti Tahunan'],
-              ['docstatus', '=', 1]
+              ['docstatus', '=', 1] // Pastikan statusnya sudah Submitted
             ]),
-            fields: JSON.stringify(['name']) 
+            fields: JSON.stringify(['name', 'total_leaves_allocated']) 
           }
         })
       );
 
       let sisaCuti = 0;
-      const allocId = findAlloc.data.data[0]?.name;
+      const allocDoc = findAlloc.data.data[0];
 
-      // 3. Ambil Dokumen Secara Utuh (Jalur Bypass Virtual Field)
-      if (allocId) {
-        const fullDoc = await firstValueFrom(
-          this.httpService.get(`${erpUrl}/api/resource/Leave Allocation/${allocId}`, { headers })
+      if (allocDoc) {
+        // Ini adalah jatah utuh (misal: 12 hari)
+        const totalAllocated = allocDoc.total_leaves_allocated || 0;
+
+        // 3. Hitung jumlah cuti yang SUDAH DIPAKAI dan DISETUJUI (Approved)
+        const usedLeavesRes = await firstValueFrom(
+          this.httpService.get(`${erpUrl}/api/resource/Leave Application`, {
+            headers,
+            params: {
+              filters: JSON.stringify([
+                ['employee', '=', employeeId],
+                ['leave_type', '=', 'Cuti Tahunan'],
+                ['status', '=', 'Approved'],
+                ['docstatus', '=', 1]
+              ]),
+              fields: JSON.stringify(['total_leave_days'])
+            }
+          })
         );
-        // Field 'remaining_leaves' akan muncul di sini karena dokumen dibuka secara individu
-        sisaCuti = fullDoc.data.data.remaining_leaves || 0;
+
+        // Menjumlahkan semua hari cuti yang sudah pernah diambil
+        const usedLeaves = usedLeavesRes.data.data.reduce((sum: number, leave: any) => sum + (leave.total_leave_days || 0), 0);
+        
+        // 4. SISA CUTI = Jatah Awal (12) - Cuti Terpakai (X)
+        sisaCuti = totalAllocated - usedLeaves;
       }
 
       return {
         success: true,
-        history: historyRes.data.data.map(i => ({
+        history: historyRes.data.data.map((i: any) => ({
           ...i,
           reason: i.description
         })),
         balance: sisaCuti
       };
 
-    } catch (error) {
+    } catch (error: any) {
       console.error('>>> ERROR LEAVE INFO:', error.response?.data || error.message);
       return { success: false, history: [], balance: 0 };
     }
   }
 
-  // Fungsi pengajuan (tetap dipertahankan di Backend meskipun FE saat ini Monitoring Only)
+  // Fungsi pengajuan cuti ke ERPNext
   async createLeaveApplication(data: any) {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL');
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY');
