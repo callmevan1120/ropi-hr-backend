@@ -46,11 +46,12 @@ export class LeavesService {
       );
 
       let sisaCuti = 0;
+      let totalCuti = 0;
       const allocDoc = findAlloc.data.data[0];
 
       if (allocDoc) {
         // Ini adalah jatah utuh (misal: 12 hari)
-        const totalAllocated = allocDoc.total_leaves_allocated || 0;
+        totalCuti = allocDoc.total_leaves_allocated || 0;
 
         // 3. Hitung jumlah cuti yang SUDAH DIPAKAI dan DISETUJUI (Approved)
         const usedLeavesRes = await firstValueFrom(
@@ -72,7 +73,7 @@ export class LeavesService {
         const usedLeaves = usedLeavesRes.data.data.reduce((sum: number, leave: any) => sum + (leave.total_leave_days || 0), 0);
         
         // 4. SISA CUTI = Jatah Awal (12) - Cuti Terpakai (X)
-        sisaCuti = totalAllocated - usedLeaves;
+        sisaCuti = totalCuti - usedLeaves;
       }
 
       return {
@@ -81,12 +82,13 @@ export class LeavesService {
           ...i,
           reason: i.description
         })),
-        balance: sisaCuti
+        balance: sisaCuti,
+        total: totalCuti 
       };
 
     } catch (error: any) {
       console.error('>>> ERROR LEAVE INFO:', error.response?.data || error.message);
-      return { success: false, history: [], balance: 0 };
+      return { success: false, history: [], balance: 0, total: 0 };
     }
   }
 
