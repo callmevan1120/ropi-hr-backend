@@ -871,27 +871,50 @@ export class AttendanceService {
     }
   }
 
+  // ─────────────────────────────────────────────────────────────────
+  // HELPER: Parse pesan error dari ERPNext _server_messages
+  // ─────────────────────────────────────────────────────────────────
+  private parseErpError(error: any, fallback: string): string {
+    const serverMsgs = error.response?.data?._server_messages;
+    if (serverMsgs) {
+      try {
+        const parsed = JSON.parse(JSON.parse(serverMsgs)[0]);
+        if (parsed.message) return parsed.message.replace(/<[^>]*>?/gm, '');
+      } catch {}
+    }
+    const exc = error.response?.data?.exception;
+    if (exc && typeof exc === 'string') {
+      const match = exc.match(/ValidationError:\s*(.+)/);
+      if (match) return match[1].trim();
+    }
+    return fallback;
+  }
+
+  // ─────────────────────────────────────────────────────────────────
   // FUNGSI UPDATE STATUS IZIN (APPROVE / REJECT)
-  // ERPNext HRMS mengharuskan status + docstatus dikirim BERSAMAAN dalam satu PUT,
-  // karena on_submit() langsung memvalidasi bahwa status harus sudah Approved/Rejected.
+  //
+  // Cara kerja Frappe/ERPNext untuk submit Leave Application:
+  //   1. Dokumen harus dalam status Draft (docstatus=0)
+  //   2. Field `status` di-save dulu via PUT biasa (docstatus tetap 0)
+  //   3. Submit via POST /api/method/frappe.client.submit
+  //      (BUKAN PUT docstatus=1, karena PUT memanggil doc.save() yang trigger
+  //       on_submit SEBELUM field status selesai di-commit ke DB)
+  // ─────────────────────────────────────────────────────────────────
   async updateLeaveStatus(docName: string, status: 'Approved' | 'Rejected') {
     const { erpUrl, authHeader } = this.getAuth();
+
     try {
-      // 1. Ambil data dokumen untuk mendapatkan leave_approver yang sudah ada
+      // LANGKAH 1: Ambil dokumen + pastikan masih Draft
       const getRes = await firstValueFrom(
         this.httpService.get(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
           { headers: { Authorization: authHeader } },
-        )
+        ),
       );
       const doc = getRes.data.data;
 
-      // Pastikan dokumen masih Draft (docstatus = 0), jangan proses ulang yang sudah disubmit
       if (doc.docstatus !== 0) {
-        return {
-          success: false,
-          message: 'Izin ini sudah pernah diproses sebelumnya.',
-        };
+        return { success: false, message: 'Izin ini sudah pernah diproses sebelumnya.' };
       }
 
       let approver = doc.leave_approver;
@@ -900,33 +923,36 @@ export class AttendanceService {
         approver = hrRes.success && hrRes.data.length > 0 ? hrRes.data[0] : 'Administrator';
       }
 
-      // SATU REQUEST: kirim status Approved/Rejected DAN docstatus 1 sekaligus.
-      // ERPNext menerima keduanya dalam satu PUT, lalu on_submit() lolos validasi
-      // karena status sudah sesuai pada saat submit dikerjakan.
+      // LANGKAH 2: Simpan field status ke dokumen (docstatus TETAP 0)
       await firstValueFrom(
         this.httpService.put(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
-          { status: status, leave_approver: approver, docstatus: 1 },
+          { status, leave_approver: approver },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
         ),
       );
 
-      return { success: true, message: `Izin berhasil ${status === 'Approved' ? 'disetujui' : 'ditolak'}.` };
+      // LANGKAH 3: Submit via frappe.client.submit — ini cara resmi Frappe untuk submit dokumen.
+      // Endpoint ini membaca ulang dokumen dari DB (sudah berisi status yang benar dari langkah 2),
+      // lalu menjalankan on_submit() dengan field status yang sudah tersimpan.
+      await firstValueFrom(
+        this.httpService.post(
+          `${erpUrl}/api/method/frappe.client.submit`,
+          { doc: { doctype: 'Leave Application', name: docName } },
+          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+        ),
+      );
+
+      return {
+        success: true,
+        message: `Izin berhasil ${status === 'Approved' ? 'disetujui' : 'ditolak'}.`,
+      };
     } catch (error: any) {
       console.error('[updateLeaveStatus] Error:', JSON.stringify(error.response?.data || error.message));
-
-      let errMsg = `Gagal ${status === 'Approved' ? 'menyetujui' : 'menolak'} izin.`;
-
-      const serverMsgs = error.response?.data?._server_messages;
-      if (serverMsgs) {
-        try {
-          const parsedMsg = JSON.parse(JSON.parse(serverMsgs)[0]);
-          if (parsedMsg.message) {
-            errMsg = parsedMsg.message.replace(/<[^>]*>?/gm, '');
-          }
-        } catch (e) {}
-      }
-
+      const errMsg = this.parseErpError(
+        error,
+        `Gagal ${status === 'Approved' ? 'menyetujui' : 'menolak'} izin.`,
+      );
       throw new HttpException({ success: false, message: errMsg }, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
