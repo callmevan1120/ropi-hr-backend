@@ -251,7 +251,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // UPLOAD BASE64 MENJADI FILE FISIK KE ERPNEXT
+  // KEJAIBAN: UPLOAD BASE64 MENJADI FILE FISIK KE ERPNEXT
   // ─────────────────────────────────────────────────────────────────
   private async uploadBase64ToERPNext(
     erpUrl: string,
@@ -342,7 +342,6 @@ export class AttendanceService {
         );
       }
 
-      // UPLOAD FOTO BASE64 MENJADI FILE FISIK SEBELUM DISIMPAN KE DATABASE
       const fotoAbsenUrl = await this.uploadBase64ToERPNext(erpUrl, authHeader, data.image_verification, `Absen_${data.employee_id}_Depan`);
       const fotoKiriUrl  = await this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_verification_image, `Absen_${data.employee_id}_Kiri`);
       const ttdUrl       = await this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_signature, `Absen_${data.employee_id}_TTD`);
@@ -569,7 +568,7 @@ export class AttendanceService {
     }
   }
 
-  // FUNGSI BARU: GET ALL LEAVE REQUESTS
+  // ENDPOINT: GET ALL LEAVE REQUESTS
   async getAllLeaveRequests() {
     const { erpUrl, authHeader } = this.getAuth();
     try {
@@ -590,7 +589,6 @@ export class AttendanceService {
       const leaveList: any[] = res.data.data ?? [];
       if (leaveList.length === 0) return { success: true, data: [] };
 
-      // Cari file attachment untuk tiap izin
       const docNames = leaveList.map((l) => l.name);
       const fileRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/File`, {
@@ -632,14 +630,19 @@ export class AttendanceService {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
+      // OTOMATIS AMBIL EMAIL HRD UNTUK DIJADIKAN APPROVER
+      const hrRes = await this.getHrUsers();
+      const defaultApprover = (hrRes.success && hrRes.data.length > 0) ? hrRes.data[0] : 'Administrator';
+
       const payload = {
-        employee:   data.employee_id,
-        leave_type: data.leave_type,
-        from_date:  data.from_date,
-        to_date:    data.to_date,
-        description: data.reason,
-        status:     'Open',
-        docstatus:  0,
+        employee:       data.employee_id,
+        leave_type:     data.leave_type,
+        from_date:      data.from_date,
+        to_date:        data.to_date,
+        description:    data.reason,
+        leave_approver: defaultApprover, // <-- Disuntik di sini agar bisa di-approve nanti
+        status:         'Open',
+        docstatus:      0,
       };
 
       const response = await firstValueFrom(
@@ -861,20 +864,61 @@ export class AttendanceService {
     }
   }
 
-  // FUNGSI BARU: UPDATE STATUS IZIN (APPROVE / REJECT)
+  // FUNGSI UPDATE STATUS IZIN (APPROVE / REJECT) 2 TAHAP
   async updateLeaveStatus(docName: string, status: 'Approved' | 'Rejected') {
     const { erpUrl, authHeader } = this.getAuth();
     try {
+      // 1. Ambil data dokumen saat ini
+      const getRes = await firstValueFrom(
+        this.httpService.get(
+          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
+          { headers: { Authorization: authHeader } },
+        )
+      );
+      const doc = getRes.data.data;
+
+      let approver = doc.leave_approver;
+      if (!approver) {
+        const hrRes = await this.getHrUsers();
+        approver = hrRes.success && hrRes.data.length > 0 ? hrRes.data[0] : 'Administrator';
+      }
+
+      // TAHAP 1: Simpan Draft (Update Status & Approver, docstatus tetap 0)
       await firstValueFrom(
         this.httpService.put(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
-          { status, docstatus: status === 'Approved' ? 1 : 2 },
+          { status, leave_approver: approver },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
         ),
       );
+
+      // TAHAP 2: Submit Dokumen ke ERPNext (Ubah docstatus jadi 1)
+      await firstValueFrom(
+        this.httpService.put(
+          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
+          { docstatus: 1 },
+          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+        ),
+      );
+
       return { success: true, message: `Izin berhasil ${status === 'Approved' ? 'disetujui' : 'ditolak'}.` };
     } catch (error: any) {
-      throw new HttpException(`Gagal mengubah status izin.`, HttpStatus.INTERNAL_SERVER_ERROR);
+      console.error('[updateLeaveStatus] Error:', JSON.stringify(error.response?.data || error.message));
+      
+      let errMsg = `Gagal ${status === 'Approved' ? 'menyetujui' : 'menolak'} izin.`;
+      
+      // Mengambil pesan error asli dari ERPNext jika ada (Misal: Saldo cuti tidak cukup)
+      const serverMsgs = error.response?.data?._server_messages;
+      if (serverMsgs) {
+        try {
+          const parsedMsg = JSON.parse(JSON.parse(serverMsgs)[0]);
+          if (parsedMsg.message) {
+            errMsg = parsedMsg.message.replace(/<[^>]*>?/gm, ''); // Membersihkan tag HTML dari ERPNext
+          }
+        } catch (e) {}
+      }
+      
+      throw new HttpException({ success: false, message: errMsg }, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 }
