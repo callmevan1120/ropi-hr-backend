@@ -904,7 +904,7 @@ export class AttendanceService {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
-      // LANGKAH 1: GET dokumen lengkap + pastikan masih Draft
+      // LANGKAH 1: GET dokumen + pastikan masih Draft
       const getRes = await firstValueFrom(
         this.httpService.get(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
@@ -923,28 +923,53 @@ export class AttendanceService {
         approver = hrRes.success && hrRes.data.length > 0 ? hrRes.data[0] : 'Administrator';
       }
 
-      // LANGKAH 2: Kirim seluruh dokumen ke frappe.client.submit dengan status sudah diubah.
-      //
-      // Kenapa tidak PUT status dulu?
-      // - ERPNext/HRMS memproteksi field `status` di Leave Application — PUT biasa tidak
-      //   bisa mengubah status dokumen Draft karena ada validasi di validate() atau field guard.
-      //
-      // Solusi: Kirim objek dokumen LENGKAP yang sudah di-mutasi (status + leave_approver diubah)
-      // langsung ke frappe.client.submit. Frappe akan:
-      //   1. Menerima seluruh field dokumen (termasuk status baru)
-      //   2. Menyimpan perubahan field tersebut
-      //   3. Menjalankan on_submit() — status sudah Approved/Rejected di memory → lolos validasi
-      const submitDoc = {
-        ...doc,
-        doctype:        'Leave Application',
-        status:         status,
-        leave_approver: approver,
-      };
+      // LANGKAH 2: Set status via frappe.client.set_value
+      // frappe.client.submit mengabaikan field dalam payload doc — ia load ulang dari DB.
+      // Satu-satunya cara mengubah field sebelum submit adalah lewat set_value
+      // yang langsung menulis ke DB tanpa melewati validasi submit.
+      await firstValueFrom(
+        this.httpService.post(
+          `${erpUrl}/api/method/frappe.client.set_value`,
+          {
+            doctype:  'Leave Application',
+            name:     docName,
+            fieldname: 'status',
+            value:    status,
+          },
+          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+        ),
+      );
 
+      // LANGKAH 3: Set leave_approver juga jika belum ada
+      if (!doc.leave_approver) {
+        await firstValueFrom(
+          this.httpService.post(
+            `${erpUrl}/api/method/frappe.client.set_value`,
+            {
+              doctype:   'Leave Application',
+              name:      docName,
+              fieldname: 'leave_approver',
+              value:     approver,
+            },
+            { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+          ),
+        ).catch(() => {}); // non-fatal jika gagal
+      }
+
+      // LANGKAH 4: GET ulang untuk dapat modified timestamp terbaru (setelah set_value)
+      const refreshRes = await firstValueFrom(
+        this.httpService.get(
+          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
+          { headers: { Authorization: authHeader } },
+        ),
+      );
+      const freshDoc = refreshRes.data.data;
+
+      // LANGKAH 5: Submit — status di DB sudah Approved/Rejected dari langkah 2
       await firstValueFrom(
         this.httpService.post(
           `${erpUrl}/api/method/frappe.client.submit`,
-          { doc: submitDoc },
+          { doc: freshDoc },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
         ),
       );
