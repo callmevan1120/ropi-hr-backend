@@ -520,7 +520,10 @@ export class AttendanceService {
         this.httpService.get(`${erpUrl}/api/resource/Leave Application`, {
           headers: { Authorization: authHeader },
           params: {
-            filters:           JSON.stringify([['employee', '=', employeeId]]),
+            filters:           JSON.stringify([
+              ['employee', '=', employeeId],
+              ['docstatus', 'in', [0, 1]], // ambil Draft (Open) DAN Submitted (Approved/Rejected)
+            ]),
             fields:            JSON.stringify([
               'name', 'leave_type', 'from_date', 'to_date',
               'description', 'status', 'total_leave_days',
@@ -578,6 +581,9 @@ export class AttendanceService {
         this.httpService.get(`${erpUrl}/api/resource/Leave Application`, {
           headers: { Authorization: authHeader },
           params: {
+            filters: JSON.stringify([
+              ['docstatus', 'in', [0, 1]], // ambil Draft (Open) DAN Submitted (Approved/Rejected)
+            ]),
             fields: JSON.stringify([
               'name', 'employee', 'employee_name', 'leave_type', 'from_date', 'to_date',
               'description', 'status', 'total_leave_days'
@@ -865,11 +871,13 @@ export class AttendanceService {
     }
   }
 
-  // FUNGSI UPDATE STATUS IZIN (APPROVE / REJECT) - 2 TAHAP
+  // FUNGSI UPDATE STATUS IZIN (APPROVE / REJECT)
+  // ERPNext HRMS mengharuskan status + docstatus dikirim BERSAMAAN dalam satu PUT,
+  // karena on_submit() langsung memvalidasi bahwa status harus sudah Approved/Rejected.
   async updateLeaveStatus(docName: string, status: 'Approved' | 'Rejected') {
     const { erpUrl, authHeader } = this.getAuth();
     try {
-      // 1. Ambil data dokumen saat ini
+      // 1. Ambil data dokumen untuk mendapatkan leave_approver yang sudah ada
       const getRes = await firstValueFrom(
         this.httpService.get(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
@@ -878,26 +886,27 @@ export class AttendanceService {
       );
       const doc = getRes.data.data;
 
+      // Pastikan dokumen masih Draft (docstatus = 0), jangan proses ulang yang sudah disubmit
+      if (doc.docstatus !== 0) {
+        return {
+          success: false,
+          message: 'Izin ini sudah pernah diproses sebelumnya.',
+        };
+      }
+
       let approver = doc.leave_approver;
       if (!approver) {
         const hrRes = await this.getHrUsers();
         approver = hrRes.success && hrRes.data.length > 0 ? hrRes.data[0] : 'Administrator';
       }
 
-      // TAHAP 1: SIMPAN DRAFT (Ubah Status ke Approved/Rejected) 
+      // SATU REQUEST: kirim status Approved/Rejected DAN docstatus 1 sekaligus.
+      // ERPNext menerima keduanya dalam satu PUT, lalu on_submit() lolos validasi
+      // karena status sudah sesuai pada saat submit dikerjakan.
       await firstValueFrom(
         this.httpService.put(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
-          { status: status, leave_approver: approver },
-          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ),
-      );
-
-      // TAHAP 2: SUBMIT DOKUMEN (Ubah docstatus jadi 1) 
-      await firstValueFrom(
-        this.httpService.put(
-          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
-          { docstatus: 1 },
+          { status: status, leave_approver: approver, docstatus: 1 },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
         ),
       );
@@ -905,19 +914,19 @@ export class AttendanceService {
       return { success: true, message: `Izin berhasil ${status === 'Approved' ? 'disetujui' : 'ditolak'}.` };
     } catch (error: any) {
       console.error('[updateLeaveStatus] Error:', JSON.stringify(error.response?.data || error.message));
-      
+
       let errMsg = `Gagal ${status === 'Approved' ? 'menyetujui' : 'menolak'} izin.`;
-      
+
       const serverMsgs = error.response?.data?._server_messages;
       if (serverMsgs) {
         try {
           const parsedMsg = JSON.parse(JSON.parse(serverMsgs)[0]);
           if (parsedMsg.message) {
-            errMsg = parsedMsg.message.replace(/<[^>]*>?/gm, ''); 
+            errMsg = parsedMsg.message.replace(/<[^>]*>?/gm, '');
           }
         } catch (e) {}
       }
-      
+
       throw new HttpException({ success: false, message: errMsg }, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
