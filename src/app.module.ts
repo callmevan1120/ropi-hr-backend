@@ -10,6 +10,7 @@ import { AttendanceController } from './attendance/attendance.controller';
 import { AttendanceService } from './attendance/attendance.service';
 import { LocationsModule } from './locations/locations.module';
 import { LeavesModule } from './leaves/leaves.module';
+import { NotificationsModule } from './notifications/notifications.module'; 
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { LeavesModule } from './leaves/leaves.module';
     HttpModule,
     LocationsModule,
     LeavesModule,
+    NotificationsModule,
   ],
   controllers: [AppController, AttendanceController],
   providers: [AppService, AttendanceService],
