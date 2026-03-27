@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Get, Query, Res, HttpStatus, Delete, Param, Patch } from '@nestjs/common';
+import { Controller, Post, Body, Get, Query, Res, HttpStatus, Delete, Param } from '@nestjs/common';
 import { AttendanceService } from './attendance.service';
 
 @Controller('api/attendance')
@@ -45,24 +45,6 @@ export class AttendanceController {
   @Delete('leave-request/:id')
   async cancelLeaveRequest(@Param('id') id: string) {
     return this.attendanceService.cancelLeaveRequest(id);
-  }
-
-  // ENDPOINT BARU: APPROVE IZIN
-  @Patch('leave-request/:id/approve')
-  async approveLeaveRequest(@Param('id') id: string) {
-    return this.attendanceService.updateLeaveStatus(id, 'Approved');
-  }
-
-  // ENDPOINT BARU: REJECT IZIN
-  @Patch('leave-request/:id/reject')
-  async rejectLeaveRequest(@Param('id') id: string) {
-    return this.attendanceService.updateLeaveStatus(id, 'Rejected');
-  }
-
-  // ENDPOINT BARU: GET ALL LEAVE REQUESTS (Untuk Kelola Izin HRD) 
-  @Get('all-leave-requests')
-  async getAllLeaveRequests() {
-    return this.attendanceService.getAllLeaveRequests();
   }
 
   @Get('leave-history')
