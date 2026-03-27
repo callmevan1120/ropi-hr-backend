@@ -251,7 +251,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // KEJAIBAN: UPLOAD BASE64 MENJADI FILE FISIK KE ERPNEXT
+  // UPLOAD BASE64 MENJADI FILE FISIK KE ERPNEXT 
   // ─────────────────────────────────────────────────────────────────
   private async uploadBase64ToERPNext(
     erpUrl: string,
@@ -568,7 +568,9 @@ export class AttendanceService {
     }
   }
 
-  // ENDPOINT: GET ALL LEAVE REQUESTS
+  // ─────────────────────────────────────────────────────────────────
+  // GET ALL LEAVE REQUESTS (Untuk Kelola Izin HRD)
+  // ─────────────────────────────────────────────────────────────────
   async getAllLeaveRequests() {
     const { erpUrl, authHeader } = this.getAuth();
     try {
@@ -630,19 +632,14 @@ export class AttendanceService {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
-      // OTOMATIS AMBIL EMAIL HRD UNTUK DIJADIKAN APPROVER
-      const hrRes = await this.getHrUsers();
-      const defaultApprover = (hrRes.success && hrRes.data.length > 0) ? hrRes.data[0] : 'Administrator';
-
       const payload = {
-        employee:       data.employee_id,
-        leave_type:     data.leave_type,
-        from_date:      data.from_date,
-        to_date:        data.to_date,
-        description:    data.reason,
-        leave_approver: defaultApprover, // <-- Disuntik di sini agar bisa di-approve nanti
-        status:         'Open',
-        docstatus:      0,
+        employee:   data.employee_id,
+        leave_type: data.leave_type,
+        from_date:  data.from_date,
+        to_date:    data.to_date,
+        description: data.reason,
+        status:     'Open',
+        docstatus:  0,
       };
 
       const response = await firstValueFrom(
@@ -738,7 +735,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET HR USERS (untuk approver shift request)
+  // GET HR USERS
   // ─────────────────────────────────────────────────────────────────
   async getHrUsers() {
     const { erpUrl, authHeader } = this.getAuth();
@@ -764,7 +761,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // SUBMIT SHIFT REQUEST (pengajuan tukar shift oleh karyawan)
+  // SUBMIT SHIFT REQUEST
   // ─────────────────────────────────────────────────────────────────
   async submitShiftRequest(data: any) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -795,7 +792,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET SHIFT REQUEST HISTORY (Riwayat pengajuan shift karyawan)
+  // GET SHIFT REQUEST HISTORY
   // ─────────────────────────────────────────────────────────────────
   async getShiftHistory(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -822,7 +819,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // CANCEL LEAVE REQUEST (batalkan izin yang masih Open)
+  // CANCEL LEAVE REQUEST
   // ─────────────────────────────────────────────────────────────────
   async cancelLeaveRequest(docName: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -864,11 +861,10 @@ export class AttendanceService {
     }
   }
 
-  // FUNGSI UPDATE STATUS IZIN (APPROVE / REJECT) 2 TAHAP
+  // FUNGSI UPDATE STATUS IZIN (APPROVE / REJECT) DALAM 1 REQUEST
   async updateLeaveStatus(docName: string, status: 'Approved' | 'Rejected') {
     const { erpUrl, authHeader } = this.getAuth();
     try {
-      // 1. Ambil data dokumen saat ini
       const getRes = await firstValueFrom(
         this.httpService.get(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
@@ -883,20 +879,15 @@ export class AttendanceService {
         approver = hrRes.success && hrRes.data.length > 0 ? hrRes.data[0] : 'Administrator';
       }
 
-      // TAHAP 1: Simpan Draft (Update Status & Approver, docstatus tetap 0)
+      // KIRIM SEMUANYA DALAM 1 KALI TEMBAKAN agar status tidak tereset ke "Open"
       await firstValueFrom(
         this.httpService.put(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
-          { status, leave_approver: approver },
-          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ),
-      );
-
-      // TAHAP 2: Submit Dokumen ke ERPNext (Ubah docstatus jadi 1)
-      await firstValueFrom(
-        this.httpService.put(
-          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
-          { docstatus: 1 },
+          { 
+            status: status, 
+            leave_approver: approver, 
+            docstatus: 1 
+          },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
         ),
       );
@@ -907,13 +898,12 @@ export class AttendanceService {
       
       let errMsg = `Gagal ${status === 'Approved' ? 'menyetujui' : 'menolak'} izin.`;
       
-      // Mengambil pesan error asli dari ERPNext jika ada (Misal: Saldo cuti tidak cukup)
       const serverMsgs = error.response?.data?._server_messages;
       if (serverMsgs) {
         try {
           const parsedMsg = JSON.parse(JSON.parse(serverMsgs)[0]);
           if (parsedMsg.message) {
-            errMsg = parsedMsg.message.replace(/<[^>]*>?/gm, ''); // Membersihkan tag HTML dari ERPNext
+            errMsg = parsedMsg.message.replace(/<[^>]*>?/gm, ''); 
           }
         } catch (e) {}
       }
