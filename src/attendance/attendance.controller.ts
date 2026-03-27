@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Get, Query, Res, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Body, Get, Query, Res, HttpStatus, Delete, Param } from '@nestjs/common';
 import { AttendanceService } from './attendance.service';
 
 @Controller('api/attendance')
@@ -40,6 +40,11 @@ export class AttendanceController {
   @Post('leave-request')
   async submitLeaveRequest(@Body() body: any) {
     return this.attendanceService.submitLeaveRequest(body);
+  }
+
+  @Delete('leave-request/:id')
+  async cancelLeaveRequest(@Param('id') id: string) {
+    return this.attendanceService.cancelLeaveRequest(id);
   }
 
   @Get('leave-history')

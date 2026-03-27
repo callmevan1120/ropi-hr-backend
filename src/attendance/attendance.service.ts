@@ -763,4 +763,49 @@ export class AttendanceService {
       return { success: false, data: [], message: 'Gagal mengambil riwayat shift.' };
     }
   }
+
+  // ─────────────────────────────────────────────────────────────────
+  // CANCEL LEAVE REQUEST (batalkan izin yang masih Open)
+  // ─────────────────────────────────────────────────────────────────
+  async cancelLeaveRequest(docName: string) {
+    const { erpUrl, authHeader } = this.getAuth();
+
+    try {
+      // 1. Cek status dulu — hanya boleh cancel kalau masih Open (docstatus=0)
+      const checkRes = await firstValueFrom(
+        this.httpService.get(
+          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
+          { headers: { Authorization: authHeader } },
+        ),
+      );
+      const doc = checkRes.data.data;
+
+      if (doc.docstatus !== 0) {
+        throw new HttpException(
+          'Izin sudah diproses HRD dan tidak bisa dibatalkan.',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+
+      // 2. Delete dokumen (hanya bisa kalau docstatus=0 / Draft)
+      await firstValueFrom(
+        this.httpService.delete(
+          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
+          { headers: { Authorization: authHeader } },
+        ),
+      );
+
+      return { success: true, message: 'Pengajuan izin berhasil dibatalkan.' };
+    } catch (error: any) {
+      if (error instanceof HttpException) throw error;
+      const errMsg = JSON.stringify(error.response?.data || error.message || '');
+      if (errMsg.includes('LinkExistsError') || errMsg.includes('Cannot delete')) {
+        throw new HttpException(
+          'Izin tidak bisa dibatalkan karena sudah terkait data lain.',
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+      throw new HttpException('Gagal membatalkan izin.', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
 }
