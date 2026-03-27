@@ -904,7 +904,7 @@ export class AttendanceService {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
-      // LANGKAH 1: Ambil dokumen + pastikan masih Draft
+      // LANGKAH 1: GET dokumen lengkap + pastikan masih Draft
       const getRes = await firstValueFrom(
         this.httpService.get(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
@@ -923,32 +923,28 @@ export class AttendanceService {
         approver = hrRes.success && hrRes.data.length > 0 ? hrRes.data[0] : 'Administrator';
       }
 
-      // LANGKAH 2: Simpan field status ke dokumen (docstatus TETAP 0)
-      await firstValueFrom(
-        this.httpService.put(
-          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
-          { status, leave_approver: approver },
-          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ),
-      );
+      // LANGKAH 2: Kirim seluruh dokumen ke frappe.client.submit dengan status sudah diubah.
+      //
+      // Kenapa tidak PUT status dulu?
+      // - ERPNext/HRMS memproteksi field `status` di Leave Application — PUT biasa tidak
+      //   bisa mengubah status dokumen Draft karena ada validasi di validate() atau field guard.
+      //
+      // Solusi: Kirim objek dokumen LENGKAP yang sudah di-mutasi (status + leave_approver diubah)
+      // langsung ke frappe.client.submit. Frappe akan:
+      //   1. Menerima seluruh field dokumen (termasuk status baru)
+      //   2. Menyimpan perubahan field tersebut
+      //   3. Menjalankan on_submit() — status sudah Approved/Rejected di memory → lolos validasi
+      const submitDoc = {
+        ...doc,
+        doctype:        'Leave Application',
+        status:         status,
+        leave_approver: approver,
+      };
 
-      // LANGKAH 3: GET ulang dokumen untuk mendapatkan `modified` timestamp terbaru.
-      // Frappe menggunakan optimistic locking — frappe.client.submit akan menolak
-      // jika timestamp dokumen yang dikirim tidak cocok dengan yang ada di DB.
-      // PUT di langkah 2 mengubah `modified`, jadi kita harus fetch ulang dulu.
-      const refreshRes = await firstValueFrom(
-        this.httpService.get(
-          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
-          { headers: { Authorization: authHeader } },
-        ),
-      );
-      const freshDoc = refreshRes.data.data;
-
-      // LANGKAH 4: Submit via frappe.client.submit dengan dokumen lengkap + timestamp terbaru.
       await firstValueFrom(
         this.httpService.post(
           `${erpUrl}/api/method/frappe.client.submit`,
-          { doc: { ...freshDoc, doctype: 'Leave Application' } },
+          { doc: submitDoc },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
         ),
       );
