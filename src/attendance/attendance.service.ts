@@ -510,7 +510,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET LEAVE HISTORY (Dengan mapping file attachment untuk preview)
+  // GET LEAVE HISTORY
   // ─────────────────────────────────────────────────────────────────
   async getLeaveHistory(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -537,8 +537,8 @@ export class AttendanceService {
       const leaveList: any[] = leaveRes.data.data;
       if (!leaveList || leaveList.length === 0) return { success: true, data: [] };
 
-      // Cari file attachment yang terkait dengan dokumen Leave Application
       const docNames = leaveList.map((l) => l.name);
+
       const fileRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/File`, {
           headers: { Authorization: authHeader },
@@ -560,7 +560,6 @@ export class AttendanceService {
         }
       }
 
-      // Gabungkan hasil agar attachment bisa diakses oleh frontend
       const result = leaveList.map((leave) => ({
         ...leave,
         attachment: attachmentMap[leave.name] ?? null,
@@ -573,14 +572,75 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // SUBMIT LEAVE REQUEST
+  // GET ALL LEAVE REQUESTS (Untuk Kelola Izin HRD)
+  // ─────────────────────────────────────────────────────────────────
+  async getAllLeaveRequests() {
+    const { erpUrl, authHeader } = this.getAuth();
+    try {
+      const res = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Leave Application`, {
+          headers: { Authorization: authHeader },
+          params: {
+            filters: JSON.stringify([
+              ['docstatus', 'in', [0, 1]], // ambil Draft (Open) DAN Submitted (Approved/Rejected)
+            ]),
+            fields: JSON.stringify([
+              'name', 'employee', 'employee_name', 'leave_type', 'from_date', 'to_date',
+              'description', 'status', 'total_leave_days'
+            ]),
+            order_by: 'creation desc',
+            limit_page_length: 500,
+          },
+        }),
+      );
+      
+      const leaveList: any[] = res.data.data ?? [];
+      if (leaveList.length === 0) return { success: true, data: [] };
+
+      const docNames = leaveList.map((l) => l.name);
+      const fileRes = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/File`, {
+          headers: { Authorization: authHeader },
+          params: {
+            filters: JSON.stringify([
+              ['attached_to_doctype', '=',  'Leave Application'],
+              ['attached_to_name',    'in', docNames],
+            ]),
+            fields: JSON.stringify(['name', 'file_url', 'attached_to_name']),
+            limit_page_length: 500,
+          },
+        }),
+      );
+
+      const attachmentMap: Record<string, string> = {};
+      for (const file of fileRes.data.data ?? []) {
+        if (!attachmentMap[file.attached_to_name]) {
+          attachmentMap[file.attached_to_name] = file.file_url;
+        }
+      }
+
+      const result = leaveList.map((leave) => ({
+        ...leave,
+        attachment: attachmentMap[leave.name] ?? null,
+      }));
+
+      return { success: true, data: result };
+    } catch (error: any) {
+      console.error('[getAllLeaveRequests] Error:', error.response?.data || error.message);
+      return { success: false, data: [], message: 'Gagal mengambil semua data izin' };
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // SUBMIT LEAVE REQUEST (DIPERBAIKI DENGAN ERROR HANDLING AKURAT)
   // ─────────────────────────────────────────────────────────────────
   async submitLeaveRequest(data: any) {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
       const hrRes = await this.getHrUsers();
-      const defaultApprover = (hrRes.success && hrRes.data.length > 0) ? hrRes.data[0] : 'Administrator';
+      // Gunakan email HRD Roti Ropi sebagai fallback jika kosong, jangan 'Administrator'
+      const defaultApprover = (hrRes.success && hrRes.data.length > 0) ? hrRes.data[0] : 'hrdrotiropi@gmail.com';
 
       const payload = {
         employee:       data.employee_id,
@@ -609,6 +669,7 @@ export class AttendanceService {
 
       const docName = response.data.data.name;
 
+      // Logic Upload File Bukti (Jika Ada)
       if (docName && data.attachment) {
         try {
           const matches = data.attachment.match(
@@ -669,19 +730,20 @@ export class AttendanceService {
 
       return {
         success: true,
-        message: 'Izin berhasil diajukan beserta buktinya',
+        message: 'Pengajuan cuti/izin berhasil dikirim.',
         data:    response.data.data,
       };
     } catch (error: any) {
-      const errorString = JSON.stringify(error.response?.data || {});
-
-      if (errorString.includes('Overlap')) {
-        throw new HttpException('Gagal: Sudah ada izin di tanggal tersebut.', HttpStatus.BAD_REQUEST);
-      } else if (errorString.includes('allocation')) {
-        throw new HttpException('Gagal: Kuota izin tidak mencukupi.', HttpStatus.BAD_REQUEST);
-      } else {
-        throw new HttpException('Gagal menyimpan pengajuan izin.', HttpStatus.INTERNAL_SERVER_ERROR);
-      }
+      console.error('[submitLeaveRequest] Error:', JSON.stringify(error.response?.data || error.message));
+      
+      // MENGGUNAKAN PARSE ERP ERROR AGAR PESAN ASLI DARI ERPNEXT MUNCUL DI LAYAR HP KARYAWAN 
+      const errMsg = this.parseErpError(
+        error,
+        'Gagal menyimpan pengajuan cuti/izin. Silakan cek saldo atau tanggal.'
+      );
+      
+      // Kembalikan status 400 Bad Request dengan pesan error spesifik dari Frappe
+      throw new HttpException({ success: false, message: errMsg }, HttpStatus.BAD_REQUEST);
     }
   }
 
@@ -809,6 +871,123 @@ export class AttendanceService {
         );
       }
       throw new HttpException('Gagal membatalkan izin.', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // HELPER: Parse pesan error dari ERPNext _server_messages
+  // ─────────────────────────────────────────────────────────────────
+  private parseErpError(error: any, fallback: string): string {
+    const serverMsgs = error.response?.data?._server_messages;
+    if (serverMsgs) {
+      try {
+        const parsed = JSON.parse(JSON.parse(serverMsgs)[0]);
+        if (parsed.message) return parsed.message.replace(/<[^>]*>?/gm, '');
+      } catch {}
+    }
+    const exc = error.response?.data?.exception;
+    if (exc && typeof exc === 'string') {
+      const match = exc.match(/ValidationError:\s*(.+)/);
+      if (match) return match[1].trim();
+    }
+    return fallback;
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // FUNGSI UPDATE STATUS IZIN (APPROVE / REJECT)
+  //
+  // Cara kerja Frappe/ERPNext untuk submit Leave Application:
+  //   1. Dokumen harus dalam status Draft (docstatus=0)
+  //   2. Field `status` di-save dulu via PUT biasa (docstatus tetap 0)
+  //   3. Submit via POST /api/method/frappe.client.submit
+  //      (BUKAN PUT docstatus=1, karena PUT memanggil doc.save() yang trigger
+  //       on_submit SEBELUM field status selesai di-commit ke DB)
+  // ─────────────────────────────────────────────────────────────────
+  async updateLeaveStatus(docName: string, status: 'Approved' | 'Rejected') {
+    const { erpUrl, authHeader } = this.getAuth();
+
+    try {
+      // LANGKAH 1: GET dokumen + pastikan masih Draft
+      const getRes = await firstValueFrom(
+        this.httpService.get(
+          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
+          { headers: { Authorization: authHeader } },
+        ),
+      );
+      const doc = getRes.data.data;
+
+      if (doc.docstatus !== 0) {
+        return { success: false, message: 'Izin ini sudah pernah diproses sebelumnya.' };
+      }
+
+      let approver = doc.leave_approver;
+      if (!approver) {
+        const hrRes = await this.getHrUsers();
+        approver = hrRes.success && hrRes.data.length > 0 ? hrRes.data[0] : 'Administrator';
+      }
+
+      // LANGKAH 2: Set status via frappe.client.set_value
+      // frappe.client.submit mengabaikan field dalam payload doc — ia load ulang dari DB.
+      // Satu-satunya cara mengubah field sebelum submit adalah lewat set_value
+      // yang langsung menulis ke DB tanpa melewati validasi submit.
+      await firstValueFrom(
+        this.httpService.post(
+          `${erpUrl}/api/method/frappe.client.set_value`,
+          {
+            doctype:  'Leave Application',
+            name:     docName,
+            fieldname: 'status',
+            value:    status,
+          },
+          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+        ),
+      );
+
+      // LANGKAH 3: Set leave_approver juga jika belum ada
+      if (!doc.leave_approver) {
+        await firstValueFrom(
+          this.httpService.post(
+            `${erpUrl}/api/method/frappe.client.set_value`,
+            {
+              doctype:   'Leave Application',
+              name:      docName,
+              fieldname: 'leave_approver',
+              value:     approver,
+            },
+            { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+          ),
+        ).catch(() => {}); // non-fatal jika gagal
+      }
+
+      // LANGKAH 4: GET ulang untuk dapat modified timestamp terbaru (setelah set_value)
+      const refreshRes = await firstValueFrom(
+        this.httpService.get(
+          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
+          { headers: { Authorization: authHeader } },
+        ),
+      );
+      const freshDoc = refreshRes.data.data;
+
+      // LANGKAH 5: Submit — status di DB sudah Approved/Rejected dari langkah 2
+      await firstValueFrom(
+        this.httpService.post(
+          `${erpUrl}/api/method/frappe.client.submit`,
+          { doc: freshDoc },
+          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+        ),
+      );
+
+      return {
+        success: true,
+        message: `Izin berhasil ${status === 'Approved' ? 'disetujui' : 'ditolak'}.`,
+      };
+    } catch (error: any) {
+      console.error('[updateLeaveStatus] Error:', JSON.stringify(error.response?.data || error.message));
+      const errMsg = this.parseErpError(
+        error,
+        `Gagal ${status === 'Approved' ? 'menyetujui' : 'menolak'} izin.`,
+      );
+      throw new HttpException({ success: false, message: errMsg }, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 }
