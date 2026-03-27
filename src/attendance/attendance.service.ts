@@ -808,4 +808,21 @@ export class AttendanceService {
       throw new HttpException('Gagal membatalkan izin.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
+
+  // 🔥 FUNGSI BARU UNTUK UPDATE STATUS IZIN (APPROVE / REJECT) 🔥
+  async updateLeaveStatus(docName: string, status: 'Approved' | 'Rejected') {
+    const { erpUrl, authHeader } = this.getAuth();
+    try {
+      await firstValueFrom(
+        this.httpService.put(
+          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
+          { status, docstatus: status === 'Approved' ? 1 : 2 },
+          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+        ),
+      );
+      return { success: true, message: `Izin berhasil ${status === 'Approved' ? 'disetujui' : 'ditolak'}.` };
+    } catch (error: any) {
+      throw new HttpException(`Gagal mengubah status izin.`, HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
 }
