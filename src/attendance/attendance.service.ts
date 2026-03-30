@@ -5,6 +5,11 @@ import { firstValueFrom } from 'rxjs';
 
 @Injectable()
 export class AttendanceService {
+  // ── VARIABEL CACHING ──
+  private cachedShifts: { data: any; time: number } | null = null;
+  private cachedLeaveTypes: { data: any; time: number } | null = null;
+  private readonly CACHE_TTL = 60 * 60 * 1000; // Cache bertahan 1 Jam (3.600.000 ms)
+
   constructor(
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
@@ -451,6 +456,12 @@ export class AttendanceService {
   // GET SHIFTS
   // ─────────────────────────────────────────────────────────────────
   async getShifts() {
+    const now = Date.now();
+    // Jika cache masih ada dan usianya kurang dari 1 jam, gunakan cache
+    if (this.cachedShifts && (now - this.cachedShifts.time < this.CACHE_TTL)) {
+      return { success: true, data: this.cachedShifts.data };
+    }
+
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
@@ -463,6 +474,8 @@ export class AttendanceService {
           },
         }),
       );
+      // Simpan ke Cache
+      this.cachedShifts = { data: response.data.data, time: now };
       return { success: true, data: response.data.data };
     } catch {
       throw new HttpException('Gagal mengambil daftar Shift dari ERPNext.', HttpStatus.INTERNAL_SERVER_ERROR);
@@ -473,6 +486,12 @@ export class AttendanceService {
   // GET LEAVE TYPES
   // ─────────────────────────────────────────────────────────────────
   async getLeaveTypes() {
+    const now = Date.now();
+    // Cek cache
+    if (this.cachedLeaveTypes && (now - this.cachedLeaveTypes.time < this.CACHE_TTL)) {
+      return { success: true, data: this.cachedLeaveTypes.data };
+    }
+
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
@@ -485,6 +504,8 @@ export class AttendanceService {
           },
         }),
       );
+      // Simpan ke cache
+      this.cachedLeaveTypes = { data: response.data.data, time: now };
       return { success: true, data: response.data.data };
     } catch {
       throw new HttpException('Gagal mengambil daftar Tipe Izin dari ERPNext.', HttpStatus.INTERNAL_SERVER_ERROR);

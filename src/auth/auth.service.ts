@@ -6,6 +6,10 @@ import { firstValueFrom } from 'rxjs';
 
 @Injectable()
 export class AuthService {
+  // ── VARIABEL CACHING ──
+  private cachedLocations: Record<string, { data: any; time: number }> = {};
+  private readonly CACHE_TTL = 60 * 60 * 1000; // 1 Jam
+
   constructor(
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
@@ -233,7 +237,6 @@ export class AuthService {
 
       const parts = emp.date_of_birth.split('-');
       const validPin = `${parts[2]}${parts[1]}${parts[0]}`;
-
       const globalPassword = this.configService.get<string>('GLOBAL_PASSWORD') || 'RotiRopi123!';
 
       if (pinInput !== validPin && pinInput !== globalPassword) {
@@ -256,12 +259,12 @@ export class AuthService {
         token: token,
         data: {
           employee_id: emp.name,
-          name: emp.employee_name,
-          email: emp.company_email || emp.personal_email || '',
-          role: emp.designation,
-          department: emp.department,
-          branch: emp.branch,
-          phone: emp.cell_number,
+          name:        emp.employee_name,
+          email:       emp.company_email || emp.personal_email || '',
+          role:        emp.designation,
+          department:  emp.department,
+          branch:      emp.branch,
+          phone:       emp.cell_number,
         },
       };
 
@@ -362,6 +365,14 @@ export class AuthService {
   // GET LOKASI — Tarik dari DocType "Shift Location"
   // =============================================
   async getLokasi(branchName: string) {
+    const cacheKey = branchName.toLowerCase();
+    const now = Date.now();
+
+    // Cek apakah lokasi cabang ini sudah ada di ingatan Vercel
+    if (this.cachedLocations[cacheKey] && (now - this.cachedLocations[cacheKey].time < this.CACHE_TTL)) {
+      return this.cachedLocations[cacheKey].data;
+    }
+
     const erpUrl    = this.configService.get<string>('ERPNEXT_URL') ?? '';
     const apiKey    = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
@@ -392,13 +403,18 @@ export class AuthService {
         );
         const shiftLoc = response.data.data;
         console.log(`[getLokasi] Berhasil dengan nama: "${nama}"`, shiftLoc);
-        return [{
+        
+        const result = [{
           branch: branchName,
           nama:   nama,
           lat:    parseKoordinat(shiftLoc.latitude),
           lng:    parseKoordinat(shiftLoc.longitude),
           radius: shiftLoc.checkin_radius || shiftLoc.radius || 100,
         }];
+
+        // Simpan ke Cache
+        this.cachedLocations[cacheKey] = { data: result, time: now };
+        return result;
       } catch {
         // coba kandidat berikutnya
       }
@@ -428,13 +444,17 @@ export class AuthService {
 
       if (cocok) {
         console.log(`[getLokasi] Match partial: "${cocok.name}"`);
-        return [{
+        const result = [{
           branch: branchName,
           nama:   cocok.name,
           lat:    parseKoordinat(cocok.latitude),
           lng:    parseKoordinat(cocok.longitude),
           radius: cocok.checkin_radius || cocok.radius || 100,
         }];
+
+        // Simpan ke Cache
+        this.cachedLocations[cacheKey] = { data: result, time: now };
+        return result;
       }
 
       console.error(`[getLokasi] Tidak ada Shift Location yang cocok untuk "${branchName}". Available:`, allLokasi.map(l => l.name));
