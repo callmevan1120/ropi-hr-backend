@@ -93,6 +93,7 @@ export class AttendanceService {
             ]),
             fields:            JSON.stringify(['name', 'start_date', 'end_date', 'docstatus']),
             limit_page_length: 50,
+            _t: Date.now(), // <-- BUST CACHE VERCEL
           },
         }),
       );
@@ -205,6 +206,7 @@ export class AttendanceService {
             fields:            JSON.stringify(['name', 'shift_type', 'start_date', 'end_date']),
             order_by:          'start_date desc',
             limit_page_length: 50,
+            _t: Date.now(), // <-- BUST CACHE VERCEL
           },
         }),
       );
@@ -233,6 +235,7 @@ export class AttendanceService {
             fields:            JSON.stringify(['name', 'shift_type', 'from_date', 'to_date']),
             order_by:          'from_date desc',
             limit_page_length: 50,
+            _t: Date.now(), // <-- BUST CACHE VERCEL
           },
         }),
       );
@@ -390,7 +393,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET HISTORY
+  // GET HISTORY (Dioptimasi dengan _t agar langsung refresh)
   // ─────────────────────────────────────────────────────────────────
   async getHistory(employeeId: string, from: string, to: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -412,6 +415,7 @@ export class AttendanceService {
             ]),
             order_by:          'time desc',
             limit_page_length: 100,
+            _t: Date.now(), // <-- BUST CACHE VERCEL
           },
         }),
       );
@@ -443,6 +447,7 @@ export class AttendanceService {
             ]),
             order_by:          'time desc',
             limit_page_length: 500,
+            _t: Date.now(), // <-- BUST CACHE VERCEL
           },
         }),
       );
@@ -471,6 +476,7 @@ export class AttendanceService {
           params: {
             fields:            JSON.stringify(['name', 'start_time', 'end_time', 'color']),
             limit_page_length: 100,
+            _t: Date.now(), // Memastikan ERPNext memberikan data terbaru saat Cache ditarik ulang
           },
         }),
       );
@@ -501,6 +507,7 @@ export class AttendanceService {
           params: {
             fields:            JSON.stringify(['name']),
             limit_page_length: 50,
+            _t: Date.now(), // Memastikan ERPNext memberikan data terbaru saat Cache ditarik ulang
           },
         }),
       );
@@ -551,6 +558,7 @@ export class AttendanceService {
             ]),
             order_by:          'from_date desc',
             limit_page_length: 50,
+            _t: Date.now(), // <-- BUST CACHE VERCEL
           },
         }),
       );
@@ -611,6 +619,7 @@ export class AttendanceService {
             ]),
             order_by: 'creation desc',
             limit_page_length: 500,
+            _t: Date.now(), // <-- BUST CACHE VERCEL
           },
         }),
       );
@@ -821,6 +830,7 @@ export class AttendanceService {
             ]),
             fields:            JSON.stringify(['name', 'email', 'full_name']),
             limit_page_length: 20,
+            _t: Date.now(), // <-- BUST CACHE VERCEL
           },
         }),
       );
@@ -879,6 +889,7 @@ export class AttendanceService {
             ]),
             order_by:          'creation desc',
             limit_page_length: 20,
+            _t: Date.now(), // <-- BUST CACHE VERCEL
           },
         }),
       );
