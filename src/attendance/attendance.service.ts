@@ -327,7 +327,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // CREATE CHECKIN
+  // CREATE CHECKIN (DIOPTIMASI DENGAN PARALLEL UPLOAD)
   // ─────────────────────────────────────────────────────────────────
   async createCheckin(data: any) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -355,9 +355,12 @@ export class AttendanceService {
         );
       }
 
-      const fotoAbsenUrl = await this.uploadBase64ToERPNext(erpUrl, authHeader, data.image_verification, `Absen_${data.employee_id}_Depan`);
-      const fotoKiriUrl  = await this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_verification_image, `Absen_${data.employee_id}_Kiri`);
-      const ttdUrl       = await this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_signature, `Absen_${data.employee_id}_TTD`);
+      // 🔥 OPTIMASI: UPLOAD 3 GAMBAR SEKALIGUS SECARA BERSAMAAN (PARALLEL) 🔥
+      const [fotoAbsenUrl, fotoKiriUrl, ttdUrl] = await Promise.all([
+        this.uploadBase64ToERPNext(erpUrl, authHeader, data.image_verification, `Absen_${data.employee_id}_Depan`),
+        this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_verification_image, `Absen_${data.employee_id}_Kiri`),
+        this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_signature, `Absen_${data.employee_id}_TTD`)
+      ]);
 
       const payload: any = {
         employee:                  data.employee_id,
@@ -895,6 +898,7 @@ export class AttendanceService {
         }
       }
 
+      this.invalidateLeaveCache();
       return {
         success: true,
         message: 'Pengajuan cuti/izin berhasil dikirim.',
