@@ -1,7 +1,7 @@
 import { Injectable, HttpException, HttpStatus } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
-import { firstValueFrom } from 'rxjs';
+import { firstValueFrom, timer, throwError, retry } from 'rxjs';
 
 @Injectable()
 export class AttendanceService {
@@ -98,9 +98,17 @@ export class AttendanceService {
             ]),
             fields:            JSON.stringify(['name', 'start_date', 'end_date', 'docstatus']),
             limit_page_length: 50,
-            _t: Date.now(), // <-- BUST CACHE VERCEL
+            _t: Date.now(), 
           },
-        }),
+        }).pipe(
+          retry({
+            count: 2,
+            delay: (error, retryCount) => {
+              if (error.response && error.response.status >= 400 && error.response.status < 500) return throwError(() => error);
+              return timer(retryCount * 1000);
+            }
+          })
+        )
       );
 
       const assignments: any[] = res.data.data ?? [];
@@ -143,7 +151,15 @@ export class AttendanceService {
           `${erpUrl}/api/resource/Shift Assignment`,
           createPayload,
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ),
+        ).pipe(
+          retry({
+            count: 2,
+            delay: (error, retryCount) => {
+              if (error.response && error.response.status >= 400 && error.response.status < 500) return throwError(() => error);
+              return timer(retryCount * 1000);
+            }
+          })
+        )
       );
 
       const docName: string = createRes.data.data.name;
@@ -153,7 +169,9 @@ export class AttendanceService {
           `${erpUrl}/api/resource/Shift Assignment/${encodeURIComponent(docName)}`,
           { docstatus: 1 },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ),
+        ).pipe(
+          retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) })
+        )
       );
 
       return { created: true, docName };
@@ -177,7 +195,9 @@ export class AttendanceService {
         this.httpService.get(
           `${erpUrl}/api/resource/Shift Type/${encodeURIComponent(shiftType)}`,
           { headers: { Authorization: authHeader } },
-        ),
+        ).pipe(
+          retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) })
+        )
       );
       const d = res.data.data;
       const fmt = (raw: string | null): string => {
@@ -211,9 +231,9 @@ export class AttendanceService {
             fields:            JSON.stringify(['name', 'shift_type', 'start_date', 'end_date']),
             order_by:          'start_date desc',
             limit_page_length: 50,
-            _t: Date.now(), // <-- BUST CACHE VERCEL
+            _t: Date.now(), 
           },
-        }),
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
       const assignments: any[] = assignRes.data.data ?? [];
@@ -240,9 +260,9 @@ export class AttendanceService {
             fields:            JSON.stringify(['name', 'shift_type', 'from_date', 'to_date']),
             order_by:          'from_date desc',
             limit_page_length: 50,
-            _t: Date.now(), // <-- BUST CACHE VERCEL
+            _t: Date.now(), 
           },
-        }),
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
       const requests: any[] = reqRes.data.data ?? [];
@@ -264,7 +284,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // UPLOAD BASE64 MENJADI FILE FISIK KE ERPNEXT 
+  // UPLOAD BASE64 MENJADI FILE FISIK KE ERPNEXT (DENGAN SMART RETRY)
   // ─────────────────────────────────────────────────────────────────
   private async uploadBase64ToERPNext(
     erpUrl: string,
@@ -316,7 +336,19 @@ export class AttendanceService {
             'Content-Type': `multipart/form-data; boundary=${boundary}`,
             'Content-Length': bodyBuffer.length.toString(),
           },
-        }),
+        }).pipe(
+          // AUTO RETRY: Jika gagal upload karena server penuh, ulangi pelan-pelan sampai 3x
+          retry({
+            count: 3,
+            delay: (error, retryCount) => {
+              if (error.response && error.response.status >= 400 && error.response.status < 500) {
+                return throwError(() => error); // Jangan ulangi jika memang formatnya yang salah
+              }
+              console.warn(`[Auto-Retry] Server ERP sibuk saat upload foto, mencoba ulang ke-${retryCount}...`);
+              return timer(retryCount * 1500); // Tunggu 1.5s, 3s, lalu 4.5s
+            }
+          })
+        )
       );
 
       return res.data.message.file_url;
@@ -327,7 +359,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // CREATE CHECKIN (DIOPTIMASI DENGAN PARALLEL UPLOAD)
+  // CREATE CHECKIN (DIOPTIMASI DENGAN PARALLEL UPLOAD + SMART RETRY)
   // ─────────────────────────────────────────────────────────────────
   async createCheckin(data: any) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -355,7 +387,7 @@ export class AttendanceService {
         );
       }
 
-      // 🔥 OPTIMASI: UPLOAD 3 GAMBAR SEKALIGUS SECARA BERSAMAAN (PARALLEL) 🔥
+      // Upload ketiga gambar bersamaan, masing-masing sudah di-cover oleh Auto-Retry 3x
       const [fotoAbsenUrl, fotoKiriUrl, ttdUrl] = await Promise.all([
         this.uploadBase64ToERPNext(erpUrl, authHeader, data.image_verification, `Absen_${data.employee_id}_Depan`),
         this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_verification_image, `Absen_${data.employee_id}_Kiri`),
@@ -380,7 +412,19 @@ export class AttendanceService {
           `${erpUrl}/api/resource/Employee Checkin`,
           payload,
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ),
+        ).pipe(
+          // AUTO RETRY: Simpan data absen dengan pengulangan jika server penuh
+          retry({
+            count: 3,
+            delay: (error, retryCount) => {
+              if (error.response && error.response.status >= 400 && error.response.status < 500) {
+                return throwError(() => error);
+              }
+              console.warn(`[Auto-Retry] Server ERP sibuk saat proses absen, mencoba ulang ke-${retryCount}...`);
+              return timer(retryCount * 1500); 
+            }
+          })
+        )
       );
 
       return {
@@ -401,7 +445,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET HISTORY (Dioptimasi dengan _t agar langsung refresh)
+  // GET HISTORY
   // ─────────────────────────────────────────────────────────────────
   async getHistory(employeeId: string, from: string, to: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -423,9 +467,9 @@ export class AttendanceService {
             ]),
             order_by:          'time desc',
             limit_page_length: 100,
-            _t: Date.now(), // <-- BUST CACHE VERCEL
+            _t: Date.now(), 
           },
-        }),
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
       return { success: true, data: response.data.data };
     } catch {
@@ -434,7 +478,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET ALL HISTORY (HR Dashboard) - OPTIMASI BULK FETCHING + CACHING
+  // GET ALL HISTORY (HR Dashboard)
   // ─────────────────────────────────────────────────────────────────
   async getAllHistory(from: string, to: string) {
     const cacheKey = `${from}|${to}`;
@@ -447,7 +491,6 @@ export class AttendanceService {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
-      // 1. Tarik Semua Data Absen
       const absensiReq = firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Employee Checkin`, {
           headers: { Authorization: authHeader },
@@ -464,10 +507,9 @@ export class AttendanceService {
             order_by: 'time desc',
             limit_page_length: 1000,
           },
-        })
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
-      // 2. Tarik Semua Data Cuti/Izin yang beririsan dengan periode ini
       const leaveReq = firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Leave Application`, {
           headers: { Authorization: authHeader },
@@ -484,10 +526,9 @@ export class AttendanceService {
             order_by: 'from_date desc',
             limit_page_length: 500,
           },
-        })
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
-      // Eksekusi kedua request secara paralel ke ERPNext
       const [absenRes, leaveRes] = await Promise.all([
         absensiReq.catch(() => ({ data: { data: [] } })),
         leaveReq.catch(() => ({ data: { data: [] } }))
@@ -496,7 +537,6 @@ export class AttendanceService {
       const dataAbsensi = absenRes.data?.data || [];
       const dataCuti = leaveRes.data?.data || [];
 
-      // 3. Gabungkan file attachment untuk Cuti/Izin jika ada
       let leaveWithFiles = dataCuti;
       if (dataCuti.length > 0) {
         const docNames = dataCuti.map((l: any) => l.name);
@@ -512,7 +552,7 @@ export class AttendanceService {
                 fields: JSON.stringify(['name', 'file_url', 'attached_to_name']),
                 limit_page_length: 500,
               },
-            })
+            }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
           );
           const fileData = fileRes.data?.data || [];
           const attachmentMap: Record<string, string> = {};
@@ -528,10 +568,8 @@ export class AttendanceService {
         }
       }
 
-      // Simpan ke cache agar request berikutnya tidak re-hit ERPNext
       const responseData = { absensi: dataAbsensi, cuti: leaveWithFiles };
       this.cachedAllHistory.set(cacheKey, { data: responseData, time: now });
-      // Bersihkan cache lama jika ada lebih dari 20 key (misal banyak range periode berbeda)
       if (this.cachedAllHistory.size > 20) {
         const oldestKey = this.cachedAllHistory.keys().next().value;
         if (oldestKey) this.cachedAllHistory.delete(oldestKey);
@@ -549,7 +587,6 @@ export class AttendanceService {
   // ─────────────────────────────────────────────────────────────────
   async getShifts() {
     const now = Date.now();
-    // Jika cache masih ada dan usianya kurang dari 1 jam, gunakan cache
     if (this.cachedShifts && (now - this.cachedShifts.time < this.CACHE_TTL)) {
       return { success: true, data: this.cachedShifts.data };
     }
@@ -563,11 +600,10 @@ export class AttendanceService {
           params: {
             fields:            JSON.stringify(['name', 'start_time', 'end_time', 'color']),
             limit_page_length: 100,
-            _t: Date.now(), // Memastikan ERPNext memberikan data terbaru saat Cache ditarik ulang
+            _t: Date.now(), 
           },
-        }),
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
-      // Simpan ke Cache
       this.cachedShifts = { data: response.data.data, time: now };
       return { success: true, data: response.data.data };
     } catch {
@@ -580,7 +616,6 @@ export class AttendanceService {
   // ─────────────────────────────────────────────────────────────────
   async getLeaveTypes() {
     const now = Date.now();
-    // Cek cache
     if (this.cachedLeaveTypes && (now - this.cachedLeaveTypes.time < this.CACHE_TTL)) {
       return { success: true, data: this.cachedLeaveTypes.data };
     }
@@ -594,11 +629,10 @@ export class AttendanceService {
           params: {
             fields:            JSON.stringify(['name']),
             limit_page_length: 50,
-            _t: Date.now(), // Memastikan ERPNext memberikan data terbaru saat Cache ditarik ulang
+            _t: Date.now(), 
           },
-        }),
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
-      // Simpan ke cache
       this.cachedLeaveTypes = { data: response.data.data, time: now };
       return { success: true, data: response.data.data };
     } catch {
@@ -617,7 +651,7 @@ export class AttendanceService {
       this.httpService.get(url, {
         headers:      { Authorization: authHeader },
         responseType: 'arraybuffer',
-      }),
+      }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
     );
 
     const contentType = response.headers['content-type'] || 'image/jpeg';
@@ -637,7 +671,7 @@ export class AttendanceService {
           params: {
             filters:           JSON.stringify([
               ['employee', '=', employeeId],
-              ['docstatus', 'in', [0, 1]], // ambil Draft (Open) DAN Submitted (Approved/Rejected)
+              ['docstatus', 'in', [0, 1]], 
             ]),
             fields:            JSON.stringify([
               'name', 'leave_type', 'from_date', 'to_date',
@@ -645,9 +679,9 @@ export class AttendanceService {
             ]),
             order_by:          'from_date desc',
             limit_page_length: 50,
-            _t: Date.now(), // <-- BUST CACHE VERCEL
+            _t: Date.now(), 
           },
-        }),
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
       const leaveList: any[] = leaveRes.data.data;
@@ -666,7 +700,7 @@ export class AttendanceService {
             fields:            JSON.stringify(['name', 'file_url', 'attached_to_name']),
             limit_page_length: 200,
           },
-        }),
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
       const attachmentMap: Record<string, string> = {};
@@ -688,7 +722,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET ALL LEAVE REQUESTS (Untuk Kelola Izin HRD) + CACHE
+  // GET ALL LEAVE REQUESTS
   // ─────────────────────────────────────────────────────────────────
   async getAllLeaveRequests() {
     const now = Date.now();
@@ -703,7 +737,7 @@ export class AttendanceService {
           headers: { Authorization: authHeader },
           params: {
             filters: JSON.stringify([
-              ['docstatus', 'in', [0, 1]], // ambil Draft (Open) DAN Submitted (Approved/Rejected)
+              ['docstatus', 'in', [0, 1]], 
             ]),
             fields: JSON.stringify([
               'name', 'employee', 'employee_name', 'leave_type', 'from_date', 'to_date',
@@ -711,9 +745,9 @@ export class AttendanceService {
             ]),
             order_by: 'creation desc',
             limit_page_length: 500,
-            _t: Date.now(), // <-- BUST CACHE VERCEL
+            _t: Date.now(), 
           },
-        }),
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
       
       const leaveList: any[] = res.data.data ?? [];
@@ -731,7 +765,7 @@ export class AttendanceService {
             fields: JSON.stringify(['name', 'file_url', 'attached_to_name']),
             limit_page_length: 500,
           },
-        }),
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
       const attachmentMap: Record<string, string> = {};
@@ -809,7 +843,6 @@ export class AttendanceService {
 
     try {
       const hrRes = await this.getHrUsers();
-      // Gunakan email HRD Roti Ropi sebagai fallback jika kosong, jangan 'Administrator'
       const defaultApprover = (hrRes.success && hrRes.data.length > 0) ? hrRes.data[0] : 'hrdrotiropi@gmail.com';
 
       const payload = {
@@ -834,12 +867,19 @@ export class AttendanceService {
               Accept:         'application/json',
             },
           },
-        ),
+        ).pipe(
+          retry({
+            count: 3,
+            delay: (error, retryCount) => {
+              if (error.response && error.response.status >= 400 && error.response.status < 500) return throwError(() => error);
+              return timer(retryCount * 1500);
+            }
+          })
+        )
       );
 
       const docName = response.data.data.name;
 
-      // Logic Upload File Bukti (Jika Ada)
       if (docName && data.attachment) {
         try {
           const matches = data.attachment.match(
@@ -891,7 +931,7 @@ export class AttendanceService {
                 'Content-Type':  `multipart/form-data; boundary=${boundary}`,
                 'Content-Length': bodyBuffer.length.toString(),
               },
-            }),
+            }).pipe(retry({ count: 3, delay: (_, retryCount) => timer(retryCount * 1500) }))
           );
         } catch (fileErr: any) {
           console.error('[Upload Gagal] Izin tersimpan, lampiran gagal:', fileErr.message);
@@ -932,9 +972,9 @@ export class AttendanceService {
             ]),
             fields:            JSON.stringify(['name', 'email', 'full_name']),
             limit_page_length: 20,
-            _t: Date.now(), // <-- BUST CACHE VERCEL
+            _t: Date.now(), 
           },
-        }),
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
       const emails: string[] = (response.data.data ?? []).map((u: any) => u.email || u.name);
       return { success: true, data: emails.length > 0 ? emails : ['hrdrotiropi@gmail.com'] };
@@ -965,7 +1005,7 @@ export class AttendanceService {
           `${erpUrl}/api/resource/Shift Request`,
           payload,
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ),
+        ).pipe(retry({ count: 3, delay: (_, retryCount) => timer(retryCount * 1500) }))
       );
 
       return { success: true, message: 'Shift Request berhasil diajukan ke HRD.', data: response.data.data };
@@ -991,9 +1031,9 @@ export class AttendanceService {
             ]),
             order_by:          'creation desc',
             limit_page_length: 20,
-            _t: Date.now(), // <-- BUST CACHE VERCEL
+            _t: Date.now(), 
           },
-        }),
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
       return { success: true, data: res.data.data ?? [] };
     } catch (error: any) {
@@ -1013,7 +1053,7 @@ export class AttendanceService {
         this.httpService.get(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
           { headers: { Authorization: authHeader } },
-        ),
+        ).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
       const doc = checkRes.data.data;
 
@@ -1028,7 +1068,7 @@ export class AttendanceService {
         this.httpService.delete(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
           { headers: { Authorization: authHeader } },
-        ),
+        ).pipe(retry({ count: 3, delay: (_, retryCount) => timer(retryCount * 1500) }))
       );
 
       this.invalidateLeaveCache();
@@ -1057,7 +1097,7 @@ export class AttendanceService {
         this.httpService.get(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
           { headers: { Authorization: authHeader } },
-        ),
+        ).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
       const doc = getRes.data.data;
 
@@ -1081,7 +1121,7 @@ export class AttendanceService {
             value:    status,
           },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ),
+        ).pipe(retry({ count: 3, delay: (_, retryCount) => timer(retryCount * 1500) }))
       );
 
       if (!doc.leave_approver) {
@@ -1095,7 +1135,7 @@ export class AttendanceService {
               value:     approver,
             },
             { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-          ),
+          ).pipe(retry({ count: 3, delay: (_, retryCount) => timer(retryCount * 1500) }))
         ).catch(() => {});
       }
 
@@ -1103,7 +1143,7 @@ export class AttendanceService {
         this.httpService.get(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
           { headers: { Authorization: authHeader } },
-        ),
+        ).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
       const freshDoc = refreshRes.data.data;
 
@@ -1112,7 +1152,7 @@ export class AttendanceService {
           `${erpUrl}/api/method/frappe.client.submit`,
           { doc: freshDoc },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ),
+        ).pipe(retry({ count: 3, delay: (_, retryCount) => timer(retryCount * 1500) }))
       );
 
       this.invalidateLeaveCache();
