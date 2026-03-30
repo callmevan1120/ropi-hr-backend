@@ -426,13 +426,14 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET ALL HISTORY (HR Dashboard)
+  // GET ALL HISTORY (HR Dashboard) - OPTIMASI BULK FETCHING + CACHING
   // ─────────────────────────────────────────────────────────────────
   async getAllHistory(from: string, to: string) {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
-      const response = await firstValueFrom(
+      // 1. Tarik Semua Data Absen
+      const absensiReq = firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Employee Checkin`, {
           headers: { Authorization: authHeader },
           params: {
@@ -445,15 +446,88 @@ export class AttendanceService {
               'custom_foto_absen', 'custom_signature', 'shift',
               'latitude', 'longitude',
             ]),
-            order_by:          'time desc',
-            limit_page_length: 500,
-            _t: Date.now(), // <-- BUST CACHE VERCEL
+            order_by: 'time desc',
+            limit_page_length: 1000, 
+            _t: Date.now(),
           },
-        }),
+        })
       );
-      return { success: true, data: response.data.data };
-    } catch {
-      throw new HttpException('Gagal mengambil semua riwayat absen.', HttpStatus.INTERNAL_SERVER_ERROR);
+
+      // 2. Tarik Semua Data Cuti/Izin yang beririsan dengan periode ini
+      const leaveReq = firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Leave Application`, {
+          headers: { Authorization: authHeader },
+          params: {
+            filters: JSON.stringify([
+              ['docstatus', 'in', [0, 1]],
+              ['from_date', '<=', to],
+              ['to_date', '>=', from],
+            ]),
+            fields: JSON.stringify([
+              'name', 'employee', 'employee_name', 'leave_type', 'from_date', 'to_date',
+              'description', 'status', 'total_leave_days'
+            ]),
+            order_by: 'from_date desc',
+            limit_page_length: 500,
+            _t: Date.now(),
+          },
+        })
+      );
+
+      // Eksekusi kedua request secara paralel ke ERPNext
+      const [absenRes, leaveRes] = await Promise.all([
+        absensiReq.catch(() => ({ data: { data: [] } })),
+        leaveReq.catch(() => ({ data: { data: [] } }))
+      ]);
+
+      const dataAbsensi = absenRes.data?.data || [];
+      const dataCuti = leaveRes.data?.data || [];
+
+      // 3. Gabungkan file attachment untuk Cuti/Izin jika ada
+      let leaveWithFiles = dataCuti;
+      if (dataCuti.length > 0) {
+        const docNames = dataCuti.map((l: any) => l.name);
+        try {
+          const fileRes = await firstValueFrom(
+            this.httpService.get(`${erpUrl}/api/resource/File`, {
+              headers: { Authorization: authHeader },
+              params: {
+                filters: JSON.stringify([
+                  ['attached_to_doctype', '=', 'Leave Application'],
+                  ['attached_to_name', 'in', docNames],
+                ]),
+                fields: JSON.stringify(['name', 'file_url', 'attached_to_name']),
+                limit_page_length: 500,
+              },
+            })
+          );
+          
+          const fileData = fileRes.data?.data || [];
+          const attachmentMap: Record<string, string> = {};
+          fileData.forEach((f: any) => {
+             if (!attachmentMap[f.attached_to_name]) attachmentMap[f.attached_to_name] = f.file_url;
+          });
+
+          leaveWithFiles = dataCuti.map((l: any) => ({
+             ...l,
+             attachment: attachmentMap[l.name] || null
+          }));
+        } catch (e) {
+          console.warn("Gagal menarik file cuti");
+        }
+      }
+
+      // Format response agar Frontend hanya butuh 1 kali panggil API ini
+      return { 
+        success: true, 
+        data: {
+           absensi: dataAbsensi,
+           cuti: leaveWithFiles
+        } 
+      };
+    } catch (error: any) {
+      console.error("getAllHistory Error:", error.response?.data || error.message);
+      throw new HttpException('Gagal mengambil riwayat dari ERPNext.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
