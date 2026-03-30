@@ -8,7 +8,12 @@ export class AttendanceService {
   // ── VARIABEL CACHING ──
   private cachedShifts: { data: any; time: number } | null = null;
   private cachedLeaveTypes: { data: any; time: number } | null = null;
-  private readonly CACHE_TTL = 60 * 60 * 1000; // Cache bertahan 1 Jam (3.600.000 ms)
+  private cachedAllLeaves: { data: any; time: number } | null = null;
+  // Cache getAllHistory: key = "from|to"
+  private cachedAllHistory: Map<string, { data: any; time: number }> = new Map();
+  private readonly CACHE_TTL = 60 * 60 * 1000;       // 1 jam untuk data statis
+  private readonly HISTORY_CACHE_TTL = 2 * 60 * 1000; // 2 menit untuk data absensi
+  private readonly LEAVE_CACHE_TTL = 3 * 60 * 1000;   // 3 menit untuk data izin
 
   constructor(
     private readonly httpService: HttpService,
@@ -429,6 +434,13 @@ export class AttendanceService {
   // GET ALL HISTORY (HR Dashboard) - OPTIMASI BULK FETCHING + CACHING
   // ─────────────────────────────────────────────────────────────────
   async getAllHistory(from: string, to: string) {
+    const cacheKey = `${from}|${to}`;
+    const now = Date.now();
+    const cached = this.cachedAllHistory.get(cacheKey);
+    if (cached && (now - cached.time < this.HISTORY_CACHE_TTL)) {
+      return { success: true, data: cached.data };
+    }
+
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
@@ -447,8 +459,7 @@ export class AttendanceService {
               'latitude', 'longitude',
             ]),
             order_by: 'time desc',
-            limit_page_length: 1000, 
-            _t: Date.now(),
+            limit_page_length: 1000,
           },
         })
       );
@@ -469,7 +480,6 @@ export class AttendanceService {
             ]),
             order_by: 'from_date desc',
             limit_page_length: 500,
-            _t: Date.now(),
           },
         })
       );
@@ -501,32 +511,32 @@ export class AttendanceService {
               },
             })
           );
-          
           const fileData = fileRes.data?.data || [];
           const attachmentMap: Record<string, string> = {};
           fileData.forEach((f: any) => {
-             if (!attachmentMap[f.attached_to_name]) attachmentMap[f.attached_to_name] = f.file_url;
+            if (!attachmentMap[f.attached_to_name]) attachmentMap[f.attached_to_name] = f.file_url;
           });
-
           leaveWithFiles = dataCuti.map((l: any) => ({
-             ...l,
-             attachment: attachmentMap[l.name] || null
+            ...l,
+            attachment: attachmentMap[l.name] || null
           }));
         } catch (e) {
-          console.warn("Gagal menarik file cuti");
+          console.warn('Gagal menarik file cuti');
         }
       }
 
-      // Format response agar Frontend hanya butuh 1 kali panggil API ini
-      return { 
-        success: true, 
-        data: {
-           absensi: dataAbsensi,
-           cuti: leaveWithFiles
-        } 
-      };
+      // Simpan ke cache agar request berikutnya tidak re-hit ERPNext
+      const responseData = { absensi: dataAbsensi, cuti: leaveWithFiles };
+      this.cachedAllHistory.set(cacheKey, { data: responseData, time: now });
+      // Bersihkan cache lama jika ada lebih dari 20 key (misal banyak range periode berbeda)
+      if (this.cachedAllHistory.size > 20) {
+        const oldestKey = this.cachedAllHistory.keys().next().value;
+        if (oldestKey) this.cachedAllHistory.delete(oldestKey);
+      }
+
+      return { success: true, data: responseData };
     } catch (error: any) {
-      console.error("getAllHistory Error:", error.response?.data || error.message);
+      console.error('getAllHistory Error:', error.response?.data || error.message);
       throw new HttpException('Gagal mengambil riwayat dari ERPNext.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
@@ -675,9 +685,14 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET ALL LEAVE REQUESTS (Untuk Kelola Izin HRD)
+  // GET ALL LEAVE REQUESTS (Untuk Kelola Izin HRD) + CACHE
   // ─────────────────────────────────────────────────────────────────
   async getAllLeaveRequests() {
+    const now = Date.now();
+    if (this.cachedAllLeaves && (now - this.cachedAllLeaves.time < this.LEAVE_CACHE_TTL)) {
+      return { success: true, data: this.cachedAllLeaves.data };
+    }
+
     const { erpUrl, authHeader } = this.getAuth();
     try {
       const res = await firstValueFrom(
@@ -728,11 +743,20 @@ export class AttendanceService {
         attachment: attachmentMap[leave.name] ?? null,
       }));
 
+      this.cachedAllLeaves = { data: result, time: Date.now() };
       return { success: true, data: result };
     } catch (error: any) {
       console.error('[getAllLeaveRequests] Error:', error.response?.data || error.message);
       return { success: false, data: [], message: 'Gagal mengambil semua data izin' };
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // HELPER: Invalidate cache izin (dipanggil setelah approve/reject/cancel)
+  // ─────────────────────────────────────────────────────────────────
+  private invalidateLeaveCache() {
+    this.cachedAllLeaves = null;
+    this.cachedAllHistory.clear();
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -1003,6 +1027,7 @@ export class AttendanceService {
         ),
       );
 
+      this.invalidateLeaveCache();
       return { success: true, message: 'Pengajuan izin berhasil dibatalkan.' };
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
@@ -1086,6 +1111,7 @@ export class AttendanceService {
         ),
       );
 
+      this.invalidateLeaveCache();
       return {
         success: true,
         message: `Izin berhasil ${status === 'Approved' ? 'disetujui' : 'ditolak'}.`,
