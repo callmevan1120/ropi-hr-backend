@@ -97,16 +97,14 @@ export class NotificationsService {
         console.warn('Gagal ambil riwayat izin untuk notifikasi');
       }
 
-      // 3. AMBIL RIWAYAT ABSEN MASUK (7 Hari Terakhir saja agar tidak memberatkan)
+      // 3. AMBIL RIWAYAT ABSEN MASUK (Bulan Ini untuk Hitung Akumulasi Telat)
       let lateNotifs: any[] = [];
       try {
-        // Ambil tanggal 7 hari yang lalu
         const d = new Date();
-        d.setDate(d.getDate() - 7);
         const yyyy = d.getFullYear();
         const mm = String(d.getMonth() + 1).padStart(2, '0');
-        const dd = String(d.getDate()).padStart(2, '0');
-        const sevenDaysAgo = `${yyyy}-${mm}-${dd} 00:00:00`;
+        // Filter dari tanggal 1 bulan ini
+        const startOfMonth = `${yyyy}-${mm}-01 00:00:00`;
 
         const attendRes = await firstValueFrom(
           this.httpService.get(`${erpUrl}/api/resource/Employee Checkin`, {
@@ -115,18 +113,21 @@ export class NotificationsService {
               filters: JSON.stringify([
                 ['employee', '=', employeeId],
                 ['log_type', '=', 'IN'],
-                ['time', '>=', sevenDaysAgo] // Hanya cek seminggu terakhir
+                ['time', '>=', startOfMonth]
               ]),
               fields: JSON.stringify(['name', 'time', 'shift', 'creation']),
-              order_by: 'time desc',
-              limit_page_length: 7, // Cukup 7 data
+              order_by: 'time asc', // ASCENDING: Urutkan dari awal bulan ke hari ini
+              limit_page_length: 100, // Cukup untuk 1 bulan
               _t: Date.now() // Bust Cache Vercel
             }
           })
         );
 
-        // DETEKSI TELAT DINAMIS (Berdasarkan Shift)
-        lateNotifs = (attendRes.data.data || []).reduce((acc: any[], a: any) => {
+        let telatCount = 0;
+        const rawAttendances = attendRes.data.data || [];
+
+        // Loop dari absen pertama di bulan ini sampai terbaru
+        rawAttendances.forEach((a: any) => {
           const jamAktual = a.time.split(' ')[1].substring(0, 5); // Misal '07:45'
           const tglAbsen = a.time.split(' ')[0];
           
@@ -135,33 +136,36 @@ export class NotificationsService {
           if (a.shift && masterShifts[a.shift]) {
             jamBatas = masterShifts[a.shift];
           } else if (a.shift && a.shift.toLowerCase().includes('satpam')) {
-            // Jika nama shift mengandung satpam dan tidak ada di master
             jamBatas = '07:00'; 
           }
 
           const selisihMenit = this.toMenit(jamAktual) - this.toMenit(jamBatas);
 
-          // Jika telat lebih dari 0 menit
           if (selisihMenit > 0) {
-            acc.push({
+            telatCount++; // Tambah angka keterlambatan bulan ini
+            
+            lateNotifs.push({
               id: `db-late-${a.name}`,
               title: 'Absen Terlambat',
-              message: `Waduh, kamu tercatat telat ${this.formatDurasi(selisihMenit)} pada tanggal ${tglAbsen}.`,
+              message: `Waduh, kamu tercatat telat ${this.formatDurasi(selisihMenit)} pada tanggal ${tglAbsen}. (Ini keterlambatan ke-${telatCount} kamu di bulan ini)`,
               time: a.creation,
               type: 'error'
             });
           }
-          return acc;
-        }, []);
+        });
+
+        // Karena kita menggunakan ASCENDING, data terbaru ada di akhir array.
+        // Kita potong 5 terakhir saja, lalu dibalik (reverse) agar yang paling baru tampil di atas.
+        lateNotifs = lateNotifs.slice(-5).reverse();
 
       } catch (err) {
         console.warn('Gagal ambil riwayat absen untuk notifikasi');
       }
 
-      // 4. GABUNGKAN DAN URUTKAN
+      // 4. GABUNGKAN DAN URUTKAN (Izin + Telat)
       const allNotifs = [...leaveNotifs, ...lateNotifs];
       
-      // Urutkan berdasarkan waktu (terbaru di atas)
+      // Urutkan berdasarkan waktu notifikasi (terbaru di atas)
       allNotifs.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
 
       return {
