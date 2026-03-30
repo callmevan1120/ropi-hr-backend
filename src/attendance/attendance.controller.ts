@@ -52,6 +52,12 @@ export class AttendanceController {
     return this.attendanceService.getLeaveHistory(employeeId);
   }
 
+  // Tarik SEMUA izin / cuti sekaligus untuk optimasi HR Dashboard
+  @Get('all-leave-requests')
+  async getAllLeaveRequests() {
+    return this.attendanceService.getAllLeaveRequests();
+  }
+
   @Get('active-shift')
   async getActiveShift(@Query('employee_id') employeeId: string) {
     return this.attendanceService.getActiveShift(employeeId);
@@ -76,14 +82,13 @@ export class AttendanceController {
   async getFile(@Query('path') filePath: string, @Res() res: any) {
     try {
       if (!filePath || !filePath.startsWith('/files/')) {
-        return res.status(400).json({ error: 'Invalid file path' });
+        return res.status(400).json({ error: 'Invalid path' });
       }
       const { buffer, contentType } = await this.attendanceService.proxyFile(filePath);
       res.set('Content-Type', contentType);
-      res.set('Cache-Control', 'public, max-age=86400');
       res.send(buffer);
-    } catch {
-      res.status(404).json({ error: 'File not found' });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to fetch file' });
     }
   }
 }
