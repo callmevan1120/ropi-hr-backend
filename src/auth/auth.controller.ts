@@ -19,22 +19,26 @@ export class AuthController {
   // ─── POST /api/auth/login ───────────────────
   @Post('auth/login')
   async login(@Body() body: any) {
-    const identifier = body.employeeId || body.email;
-    return this.authService.login(identifier, body.password);
+    const identifier = body.email || body.employeeId;
+    const pin = body.pin || body.password;
+    
+    if (!identifier || !pin) {
+      throw new HttpException('Email dan PIN wajib diisi', HttpStatus.BAD_REQUEST);
+    }
+    
+    return this.authService.login(identifier, pin);
   }
 
   // ─── GET /api/locations/:branch ─────────────
   @Get('locations/:branch')
   async getLokasiByBranch(@Param('branch') branch: string) {
-    const lokasi = await this.authService.getLokasi(branch);
-    return { success: true, locations: lokasi };
+    return this.authService.getLokasi(branch);
   }
 
-  // ─── POST /api/attendance/checkin ───────────
-  @Post('attendance/checkin')
-  async checkin(@Body() body: any) {
-    // FIX: ambil juga field 'shift' dari body yang dikirim frontend
-    const { employee_id, tipe, latitude, longitude, branch, shift } = body;
+  // ─── POST /api/validate-location ────────────
+  @Post('validate-location')
+  async validateLocation(@Body() body: any) {
+    const { employee_id, tipe, latitude, longitude, branch } = body;
 
     if (!employee_id || !tipe || latitude === undefined || longitude === undefined || !branch) {
       throw new HttpException(
@@ -70,12 +74,17 @@ export class AuthController {
 
     if (!lokasiValid) {
       throw new HttpException(
-        `Lokasi tidak sesuai! Kamu berada ${lokasiTerdekat.jarak}m dari titik absen ${lokasiTerdekat.nama}. Batas maksimal radius: ${lokasiTerdekat.radius}m.`,
-        HttpStatus.FORBIDDEN,
+        `Lokasi tidak sesuai! Kamu berada ${lokasiTerdekat.jarak}m dari titik absen ${lokasiTerdekat.nama}. Batas maksimal adalah ${lokasiTerdekat.radius}m.`,
+        HttpStatus.BAD_REQUEST,
       );
     }
 
-    // FIX: teruskan 'shift' dari frontend ke authService.absen()
-    return this.authService.absen(employee_id, tipe, latitude, longitude, branch, shift);
+    return { success: true, message: 'Lokasi valid', lokasi: lokasiTerdekat };
+  }
+
+  // ─── GET /api/attendance/status/:employeeId ───
+  @Get('attendance/status/:employeeId')
+  async getAttendanceStatus(@Param('employeeId') employeeId: string) {
+    return this.authService.getAttendanceStatus(employeeId);
   }
 }

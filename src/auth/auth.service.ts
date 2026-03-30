@@ -1,6 +1,7 @@
 import { Injectable, UnauthorizedException, HttpException, HttpStatus } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
 import { firstValueFrom } from 'rxjs';
 
 @Injectable()
@@ -8,6 +9,7 @@ export class AuthService {
   constructor(
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
+    private readonly jwtService: JwtService,
   ) {}
 
   // =============================================
@@ -103,7 +105,7 @@ export class AuthService {
             filters: JSON.stringify([
               ['employee',   '=',  employeeId],
               ['start_date', '<=', tanggalStr],
-              ['docstatus',  '!=', 2],           // bukan yang sudah di-cancel
+              ['docstatus',  '!=', 2],            // bukan yang sudah di-cancel
             ]),
             fields: JSON.stringify(['name', 'shift_type', 'start_date', 'end_date', 'docstatus']),
             limit_page_length: 10,
@@ -183,60 +185,92 @@ export class AuthService {
   }
 
   // =============================================
-  // LOGIN
+  // LOGIN DENGAN EMAIL & PIN (TANGGAL LAHIR)
   // =============================================
-  async login(email: string, pass: string) {
-    const globalPassword = this.configService.get<string>('GLOBAL_PASSWORD') || 'rahasia123';
-
-    if (pass !== globalPassword) {
-      throw new UnauthorizedException('Password yang kamu masukkan salah!');
-    }
-
-    const erpUrl    = this.configService.get<string>('ERPNEXT_URL') ?? '';
-    const apiKey    = this.configService.get<string>('ERPNEXT_API_KEY') ?? '';
-    const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET') ?? '';
+  async login(email: string, pinInput: string) {
+    const erpUrl = this.configService.get<string>('ERPNEXT_URL');
+    const apiKey = this.configService.get<string>('ERPNEXT_API_KEY');
+    const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET');
+    const authHeader = `token ${apiKey}:${apiSecret}`;
 
     try {
-      const response = await firstValueFrom(
+      let response = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Employee`, {
-          headers: { Authorization: `token ${apiKey}:${apiSecret}` },
+          headers: { Authorization: authHeader },
           params: {
-            fields: JSON.stringify([
-              'name', 'employee_name', 'company_email', 'personal_email',
-              'designation', 'department', 'branch', 'cell_number',
-            ]),
-            limit_page_length: 1000,
+            filters: JSON.stringify([['company_email', '=', email]]),
+            fields: JSON.stringify(['name', 'employee_name', 'company_email', 'personal_email', 'date_of_birth', 'designation', 'department', 'branch', 'cell_number']),
+            limit_page_length: 1,
           },
-        }),
+        })
       );
 
-      const employees = response.data.data;
-      const employee  = employees.find(
-        (emp) => emp.company_email === email || emp.personal_email === email,
-      );
+      let employees = response.data.data || [];
 
-      if (!employee) {
-        throw new UnauthorizedException(
-          `Email ${email} belum terdaftar di ERPNext. Hubungi HR!`,
+      if (employees.length === 0) {
+        response = await firstValueFrom(
+          this.httpService.get(`${erpUrl}/api/resource/Employee`, {
+            headers: { Authorization: authHeader },
+            params: {
+              filters: JSON.stringify([['personal_email', '=', email]]),
+              fields: JSON.stringify(['name', 'employee_name', 'company_email', 'personal_email', 'date_of_birth', 'designation', 'department', 'branch', 'cell_number']),
+              limit_page_length: 1,
+            },
+          })
         );
+        employees = response.data.data || [];
       }
+
+      if (employees.length === 0) {
+        throw new UnauthorizedException('Email tidak terdaftar dalam sistem HRD.');
+      }
+
+      const emp = employees[0];
+
+      if (!emp.date_of_birth) {
+        throw new UnauthorizedException('Data Tanggal Lahir belum diisi oleh HRD. Silakan lapor ke Admin untuk melengkapi data Anda.');
+      }
+
+      const parts = emp.date_of_birth.split('-');
+      const validPin = `${parts[2]}${parts[1]}${parts[0]}`;
+
+      const globalPassword = this.configService.get<string>('GLOBAL_PASSWORD') || 'RotiRopi123!';
+
+      if (pinInput !== validPin && pinInput !== globalPassword) {
+        throw new UnauthorizedException('PIN salah. Gunakan format Tanggal Lahir (DDMMYYYY).');
+      }
+
+      const payload = {
+        sub: emp.name,
+        email: email,
+        role: emp.designation,
+        branch: emp.branch,
+      };
+      
+      const token = this.jwtService.sign(payload);
 
       return {
         statusCode: 200,
+        success: true,
         message: 'Login Berhasil',
+        token: token,
         data: {
-          employee_id: employee.name,
-          name:        employee.employee_name,
-          email:       employee.company_email || employee.personal_email || '',
-          role:        employee.designation,
-          department:  employee.department,
-          branch:      employee.branch,
-          phone:       employee.cell_number,
+          employee_id: emp.name,
+          name: emp.employee_name,
+          email: emp.company_email || emp.personal_email || '',
+          role: emp.designation,
+          department: emp.department,
+          branch: emp.branch,
+          phone: emp.cell_number,
         },
       };
-    } catch (error) {
-      if (error instanceof UnauthorizedException) throw error;
-      throw new HttpException('Gagal terhubung ke database HR.', HttpStatus.INTERNAL_SERVER_ERROR);
+
+    } catch (error: any) {
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      console.error('Error Login ERPNext:', error.response?.data || error.message);
+      throw new HttpException('Gagal terhubung ke server ERP', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
