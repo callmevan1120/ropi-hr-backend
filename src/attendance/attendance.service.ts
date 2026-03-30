@@ -632,7 +632,46 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // SUBMIT LEAVE REQUEST (DIPERBAIKI DENGAN ERROR HANDLING AKURAT)
+  // HELPER: Parse pesan error dari ERPNext _server_messages & exception
+  // ─────────────────────────────────────────────────────────────────
+  private parseErpError(error: any, fallback: string): string {
+    const data = error.response?.data;
+    if (!data) return fallback;
+
+    if (data.exception) {
+      if (data.exception.includes('OverlapError') || data.exception.includes('already applied')) {
+        return 'Kamu sudah pernah mengajukan izin/cuti untuk rentang tanggal ini. Silakan cek riwayat pengajuanmu.';
+      }
+      if (data.exception.includes('InsufficientLeaveBalance')) {
+        return 'Jatah cutimu tidak mencukupi untuk pengajuan ini.';
+      }
+    }
+
+    if (data._server_messages) {
+      try {
+        const messages = JSON.parse(data._server_messages);
+        for (const msgStr of messages) {
+          const msgObj = JSON.parse(msgStr);
+          if (msgObj.message) {
+            if (msgObj.message.includes('OverlapError') || msgObj.message.includes('already applied')) {
+              return 'Kamu sudah pernah mengajukan izin/cuti untuk rentang tanggal ini. Silakan cek riwayat pengajuanmu.';
+            }
+            if (msgObj.message.includes('InsufficientLeaveBalance')) {
+              return 'Jatah cutimu tidak mencukupi untuk pengajuan ini.';
+            }
+            if (msgObj.indicator === 'red') {
+              return msgObj.message.replace(/<[^>]*>?/gm, '');
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
+    return data.message || fallback;
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // SUBMIT LEAVE REQUEST
   // ─────────────────────────────────────────────────────────────────
   async submitLeaveRequest(data: any) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -736,13 +775,11 @@ export class AttendanceService {
     } catch (error: any) {
       console.error('[submitLeaveRequest] Error:', JSON.stringify(error.response?.data || error.message));
       
-      // MENGGUNAKAN PARSE ERP ERROR AGAR PESAN ASLI DARI ERPNEXT MUNCUL DI LAYAR HP KARYAWAN 
       const errMsg = this.parseErpError(
         error,
-        'Gagal menyimpan pengajuan cuti/izin. Silakan cek saldo atau tanggal.'
+        'Gagal menyimpan pengajuan cuti/izin. Silakan cek riwayat atau hubungi HRD.'
       );
       
-      // Kembalikan status 400 Bad Request dengan pesan error spesifik dari Frappe
       throw new HttpException({ success: false, message: errMsg }, HttpStatus.BAD_REQUEST);
     }
   }
@@ -875,39 +912,12 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // HELPER: Parse pesan error dari ERPNext _server_messages
-  // ─────────────────────────────────────────────────────────────────
-  private parseErpError(error: any, fallback: string): string {
-    const serverMsgs = error.response?.data?._server_messages;
-    if (serverMsgs) {
-      try {
-        const parsed = JSON.parse(JSON.parse(serverMsgs)[0]);
-        if (parsed.message) return parsed.message.replace(/<[^>]*>?/gm, '');
-      } catch {}
-    }
-    const exc = error.response?.data?.exception;
-    if (exc && typeof exc === 'string') {
-      const match = exc.match(/ValidationError:\s*(.+)/);
-      if (match) return match[1].trim();
-    }
-    return fallback;
-  }
-
-  // ─────────────────────────────────────────────────────────────────
   // FUNGSI UPDATE STATUS IZIN (APPROVE / REJECT)
-  //
-  // Cara kerja Frappe/ERPNext untuk submit Leave Application:
-  //   1. Dokumen harus dalam status Draft (docstatus=0)
-  //   2. Field `status` di-save dulu via PUT biasa (docstatus tetap 0)
-  //   3. Submit via POST /api/method/frappe.client.submit
-  //      (BUKAN PUT docstatus=1, karena PUT memanggil doc.save() yang trigger
-  //       on_submit SEBELUM field status selesai di-commit ke DB)
   // ─────────────────────────────────────────────────────────────────
   async updateLeaveStatus(docName: string, status: 'Approved' | 'Rejected') {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
-      // LANGKAH 1: GET dokumen + pastikan masih Draft
       const getRes = await firstValueFrom(
         this.httpService.get(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
@@ -926,10 +936,6 @@ export class AttendanceService {
         approver = hrRes.success && hrRes.data.length > 0 ? hrRes.data[0] : 'Administrator';
       }
 
-      // LANGKAH 2: Set status via frappe.client.set_value
-      // frappe.client.submit mengabaikan field dalam payload doc — ia load ulang dari DB.
-      // Satu-satunya cara mengubah field sebelum submit adalah lewat set_value
-      // yang langsung menulis ke DB tanpa melewati validasi submit.
       await firstValueFrom(
         this.httpService.post(
           `${erpUrl}/api/method/frappe.client.set_value`,
@@ -943,7 +949,6 @@ export class AttendanceService {
         ),
       );
 
-      // LANGKAH 3: Set leave_approver juga jika belum ada
       if (!doc.leave_approver) {
         await firstValueFrom(
           this.httpService.post(
@@ -956,10 +961,9 @@ export class AttendanceService {
             },
             { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
           ),
-        ).catch(() => {}); // non-fatal jika gagal
+        ).catch(() => {});
       }
 
-      // LANGKAH 4: GET ulang untuk dapat modified timestamp terbaru (setelah set_value)
       const refreshRes = await firstValueFrom(
         this.httpService.get(
           `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
@@ -968,7 +972,6 @@ export class AttendanceService {
       );
       const freshDoc = refreshRes.data.data;
 
-      // LANGKAH 5: Submit — status di DB sudah Approved/Rejected dari langkah 2
       await firstValueFrom(
         this.httpService.post(
           `${erpUrl}/api/method/frappe.client.submit`,
