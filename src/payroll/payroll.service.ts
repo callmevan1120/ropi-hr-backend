@@ -29,7 +29,7 @@ export class PayrollService {
             ]),
             fields: JSON.stringify(['name', 'start_date', 'end_date', 'net_pay', 'status']),
             order_by: 'start_date desc',
-            limit_page_length: 12 // Ambil 12 bulan terakhir
+            limit_page_length: 24, // Ditingkatkan ke 24 (2 Tahun) agar karyawan lebih puas
           },
         })
       );
@@ -44,8 +44,9 @@ export class PayrollService {
     }
   }
 
-  // 2. Download PDF Slip Gaji langsung dari ERPNext
-  async downloadSlipPdf(slipId: string): Promise<Buffer> {
+  // 2. Stream PDF Slip Gaji langsung dari ERPNext (Optimasi RAM Vercel)
+  // Nama fungsi diubah agar cocok dengan pemanggilan di Controller
+  async streamSlipPdf(slipId: string): Promise<any> {
     const erpUrl = this.configService.get<string>('ERPNEXT_URL');
     const apiKey = this.configService.get<string>('ERPNEXT_API_KEY');
     const apiSecret = this.configService.get<string>('ERPNEXT_API_SECRET');
@@ -58,19 +59,20 @@ export class PayrollService {
           params: {
             doctype: 'Salary Slip',
             name: slipId,
-            // format: 'Standard', // Optional, ERPNext akan pakai default jika tidak diisi
             no_letterhead: 0
           },
-          responseType: 'arraybuffer', // SANGAT PENTING: Agar PDF tidak rusak saat diterima
+          // SANGAT PENTING: responseType diubah menjadi stream agar Vercel tidak kehabisan RAM
+          responseType: 'stream', 
         }).pipe(
           catchError((error) => {
-            console.error('>>> ERROR DOWNLOAD PDF:', error.response?.data || error.message);
+            console.error('>>> ERROR DOWNLOAD STREAM PDF:', error.response?.data || error.message);
             throw new HttpException('Gagal mengunduh PDF dari ERPNext', HttpStatus.BAD_REQUEST);
           })
         )
       );
 
-      return Buffer.from(response.data);
+      // Kembalikan objek Stream secara langsung
+      return response.data;
     } catch (error) {
       throw new HttpException('Terjadi kesalahan saat mengambil PDF', HttpStatus.INTERNAL_SERVER_ERROR);
     }

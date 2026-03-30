@@ -1,6 +1,6 @@
 import { Controller, Get, Query, Res, HttpException, HttpStatus } from '@nestjs/common';
 import { PayrollService } from './payroll.service';
-// import { Response } from 'express'; <-- Hapus atau comment baris ini
+// import { Response } from 'express'; <-- Tetap dihapus/dicomment sesuai gaya kodemu
 
 @Controller('api/payroll')
 export class PayrollController {
@@ -14,7 +14,7 @@ export class PayrollController {
     return this.payrollService.getSlips(employeeId);
   }
 
-  // 👇 Ubah Response menjadi any 👇
+  // Menggunakan res: any sesuai keinginanmu
   @Get('download')
   async downloadSlip(@Query('slip_id') slipId: string, @Res() res: any) {
     if (!slipId) {
@@ -22,17 +22,22 @@ export class PayrollController {
     }
 
     try {
-      const pdfBuffer = await this.payrollService.downloadSlipPdf(slipId);
+      // Sekarang kita memanggil fungsi stream, bukan fungsi buffer
+      const pdfStream = await this.payrollService.streamSlipPdf(slipId);
       
       res.set({
         'Content-Type': 'application/pdf',
         'Content-Disposition': `attachment; filename="Slip_Gaji_${slipId}.pdf"`,
-        'Content-Length': pdfBuffer.length,
       });
 
-      res.send(pdfBuffer);
+      // Mengalirkan (pipe) data langsung dari ERPNext ke klien
+      pdfStream.pipe(res);
     } catch (error) {
-      throw new HttpException('Gagal memproses file PDF', HttpStatus.INTERNAL_SERVER_ERROR);
+      console.error('Download Slip Error:', error);
+      res.status(HttpStatus.INTERNAL_SERVER_ERROR).send({
+        success: false,
+        message: 'Gagal memproses file PDF dari sistem.'
+      });
     }
   }
 }
