@@ -12,6 +12,10 @@ import { LocationsModule } from './locations/locations.module';
 import { LeavesModule } from './leaves/leaves.module';
 import { NotificationsModule } from './notifications/notifications.module'; 
 
+// IMPORT UNTUK RATE LIMITER (ANTI-SPAM)
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
+
 @Module({
   imports: [
     ServeStaticModule.forRoot({
@@ -20,6 +24,14 @@ import { NotificationsModule } from './notifications/notifications.module';
     ConfigModule.forRoot({
       isGlobal: true,
     }),
+    
+    // KONFIGURASI RATE LIMITER
+    // Membatasi 1 user/IP maksimal 30 request per 1 menit (60000 ms)
+    ThrottlerModule.forRoot([{
+      ttl: 60000,
+      limit: 30,
+    }]),
+
     AuthModule,
     HttpModule,
     LocationsModule,
@@ -27,6 +39,14 @@ import { NotificationsModule } from './notifications/notifications.module';
     NotificationsModule,
   ],
   controllers: [AppController, AttendanceController],
-  providers: [AppService, AttendanceService],
+  providers: [
+    AppService, 
+    AttendanceService,
+    // MENGAKTIFKAN PENJAGAAN (GUARD) KE SELURUH API
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    }
+  ],
 })
 export class AppModule {}
