@@ -78,6 +78,19 @@ export class AttendanceController {
     return this.attendanceService.getShiftHistory(employeeId);
   }
 
+  // ─────────────────────────────────────────────────────────────────
+  // ENDPOINT LEMBUR (OVERTIME)
+  // ─────────────────────────────────────────────────────────────────
+  @Post('overtime-request')
+  async submitOvertimeRequest(@Body() body: any) {
+    return this.attendanceService.submitOvertimeRequest(body);
+  }
+
+  @Get('overtime-history')
+  async getOvertimeHistory(@Query('employee_id') employeeId: string) {
+    return this.attendanceService.getOvertimeHistory(employeeId);
+  }
+
   @Get('file')
   async getFile(@Query('path') filePath: string, @Res() res: any) {
     try {
