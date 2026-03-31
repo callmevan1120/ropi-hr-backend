@@ -337,15 +337,14 @@ export class AttendanceService {
             'Content-Length': bodyBuffer.length.toString(),
           },
         }).pipe(
-          // AUTO RETRY: Jika gagal upload karena server penuh, ulangi pelan-pelan sampai 3x
           retry({
             count: 3,
             delay: (error, retryCount) => {
               if (error.response && error.response.status >= 400 && error.response.status < 500) {
-                return throwError(() => error); // Jangan ulangi jika memang formatnya yang salah
+                return throwError(() => error); 
               }
               console.warn(`[Auto-Retry] Server ERP sibuk saat upload foto, mencoba ulang ke-${retryCount}...`);
-              return timer(retryCount * 1500); // Tunggu 1.5s, 3s, lalu 4.5s
+              return timer(retryCount * 1500); 
             }
           })
         )
@@ -387,7 +386,6 @@ export class AttendanceService {
         );
       }
 
-      // Upload ketiga gambar bersamaan, masing-masing sudah di-cover oleh Auto-Retry 3x
       const [fotoAbsenUrl, fotoKiriUrl, ttdUrl] = await Promise.all([
         this.uploadBase64ToERPNext(erpUrl, authHeader, data.image_verification, `Absen_${data.employee_id}_Depan`),
         this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_verification_image, `Absen_${data.employee_id}_Kiri`),
@@ -413,7 +411,6 @@ export class AttendanceService {
           payload,
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
         ).pipe(
-          // AUTO RETRY: Simpan data absen dengan pengulangan jika server penuh
           retry({
             count: 3,
             delay: (error, retryCount) => {
@@ -478,7 +475,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET ALL HISTORY (HR Dashboard)
+  // GET ALL HISTORY (HR Dashboard) - 🔥 DENGAN TAMBAHAN LEMBUR 🔥
   // ─────────────────────────────────────────────────────────────────
   async getAllHistory(from: string, to: string) {
     const cacheKey = `${from}|${to}`;
@@ -505,7 +502,7 @@ export class AttendanceService {
               'latitude', 'longitude',
             ]),
             order_by: 'time desc',
-            limit_page_length: 1000,
+            limit_page_length: 2000,
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
@@ -524,18 +521,36 @@ export class AttendanceService {
               'description', 'status', 'total_leave_days'
             ]),
             order_by: 'from_date desc',
-            limit_page_length: 500,
+            limit_page_length: 1000,
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
-      const [absenRes, leaveRes] = await Promise.all([
+      // Menarik Data Lembur
+      const overtimeReq = firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Overtime Request`, {
+          headers: { Authorization: authHeader },
+          params: {
+            filters: JSON.stringify([
+              ['docstatus', 'in', [0, 1]],
+              ['overtime_date', '<=', to],
+              ['overtime_date', '>=', from],
+            ]),
+            fields: JSON.stringify(['name', 'employee', 'overtime_date', 'start_time', 'end_time', 'status']),
+            limit_page_length: 1000,
+          },
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
+      );
+
+      const [absenRes, leaveRes, overtimeRes] = await Promise.all([
         absensiReq.catch(() => ({ data: { data: [] } })),
-        leaveReq.catch(() => ({ data: { data: [] } }))
+        leaveReq.catch(() => ({ data: { data: [] } })),
+        overtimeReq.catch(() => ({ data: { data: [] } }))
       ]);
 
       const dataAbsensi = absenRes.data?.data || [];
-      const dataCuti = leaveRes.data?.data || [];
+      const dataCuti    = leaveRes.data?.data || [];
+      const dataLembur  = overtimeRes.data?.data || [];
 
       let leaveWithFiles = dataCuti;
       if (dataCuti.length > 0) {
@@ -550,7 +565,7 @@ export class AttendanceService {
                   ['attached_to_name', 'in', docNames],
                 ]),
                 fields: JSON.stringify(['name', 'file_url', 'attached_to_name']),
-                limit_page_length: 500,
+                limit_page_length: 1000,
               },
             }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
           );
@@ -568,7 +583,7 @@ export class AttendanceService {
         }
       }
 
-      const responseData = { absensi: dataAbsensi, cuti: leaveWithFiles };
+      const responseData = { absensi: dataAbsensi, cuti: leaveWithFiles, lembur: dataLembur };
       this.cachedAllHistory.set(cacheKey, { data: responseData, time: now });
       if (this.cachedAllHistory.size > 20) {
         const oldestKey = this.cachedAllHistory.keys().next().value;
