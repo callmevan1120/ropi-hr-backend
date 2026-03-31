@@ -1169,4 +1169,65 @@ export class AttendanceService {
       throw new HttpException({ success: false, message: errMsg }, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
+
+  // ─────────────────────────────────────────────────────────────────
+  // SUBMIT OVERTIME REQUEST (PENGAJUAN LEMBUR)
+  // ─────────────────────────────────────────────────────────────────
+  async submitOvertimeRequest(data: any) {
+    const { erpUrl, authHeader } = this.getAuth();
+
+    try {
+      const payload = {
+        employee:      data.employee_id,
+        overtime_date: data.overtime_date,
+        start_time:    data.start_time,
+        end_time:      data.end_time,
+        description:   data.description,
+        status:        'Pending',
+        docstatus:     0, // Simpan sebagai Draft
+      };
+
+      const response = await firstValueFrom(
+        this.httpService.post(
+          `${erpUrl}/api/resource/Overtime Request`,
+          payload,
+          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+        ).pipe(
+          retry({ count: 3, delay: (_, retryCount) => timer(retryCount * 1500) })
+        )
+      );
+
+      return { success: true, message: 'Lembur berhasil diajukan.', data: response.data.data };
+    } catch (error: any) {
+      console.error('[Overtime] Gagal:', error.response?.data || error.message);
+      throw new HttpException('Gagal mengajukan lembur.', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // GET OVERTIME HISTORY (RIWAYAT LEMBUR KARYAWAN)
+  // ─────────────────────────────────────────────────────────────────
+  async getOvertimeHistory(employeeId: string) {
+    const { erpUrl, authHeader } = this.getAuth();
+    try {
+      const res = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Overtime Request`, {
+          headers: { Authorization: authHeader },
+          params: {
+            filters: JSON.stringify([['employee', '=', employeeId]]),
+            fields: JSON.stringify([
+              'name', 'overtime_date', 'start_time', 'end_time',
+              'description', 'status', 'creation',
+            ]),
+            order_by:          'creation desc',
+            limit_page_length: 20,
+            _t: Date.now(),
+          },
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
+      );
+      return { success: true, data: res.data.data ?? [] };
+    } catch (error: any) {
+      return { success: false, data: [], message: 'Gagal mengambil riwayat lembur.' };
+    }
+  }
 }
