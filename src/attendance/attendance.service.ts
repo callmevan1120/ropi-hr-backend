@@ -284,7 +284,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // UPLOAD BASE64 MENJADI FILE FISIK KE ERPNEXT (DENGAN SMART RETRY)
+  // UPLOAD BASE64 MENJADI FILE FISIK KE ERPNEXT
   // ─────────────────────────────────────────────────────────────────
   private async uploadBase64ToERPNext(
     erpUrl: string,
@@ -358,7 +358,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // CREATE CHECKIN (DIOPTIMASI DENGAN PARALLEL UPLOAD + SMART RETRY)
+  // CREATE CHECKIN (HANYA FOTO, TANPA TTD)
   // ─────────────────────────────────────────────────────────────────
   async createCheckin(data: any) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -386,10 +386,9 @@ export class AttendanceService {
         );
       }
 
-      const [fotoAbsenUrl, fotoKiriUrl, ttdUrl] = await Promise.all([
+      const [fotoAbsenUrl, fotoKiriUrl] = await Promise.all([
         this.uploadBase64ToERPNext(erpUrl, authHeader, data.image_verification, `Absen_${data.employee_id}_Depan`),
-        this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_verification_image, `Absen_${data.employee_id}_Kiri`),
-        this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_signature, `Absen_${data.employee_id}_TTD`)
+        this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_verification_image, `Absen_${data.employee_id}_Kiri`)
       ]);
 
       const payload: any = {
@@ -400,7 +399,6 @@ export class AttendanceService {
         longitude:                 data.longitude,
         custom_foto_absen:         fotoAbsenUrl || data.image_verification, 
         custom_verification_image: fotoKiriUrl || data.custom_verification_image,
-        custom_signature:          ttdUrl || data.custom_signature,
         shift:                     shiftName,
         device_id:                 'RopiHR-PWA',
       };
@@ -459,7 +457,7 @@ export class AttendanceService {
             ]),
             fields: JSON.stringify([
               'name', 'employee', 'log_type', 'time',
-              'custom_foto_absen', 'custom_signature', 'shift',
+              'custom_foto_absen', 'shift',
               'custom_verification_image', 'latitude', 'longitude',
             ]),
             order_by:          'time desc',
@@ -475,7 +473,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET ALL HISTORY (HR Dashboard) - 🔥 DENGAN TAMBAHAN LEMBUR 🔥
+  // GET ALL HISTORY (HR Dashboard)
   // ─────────────────────────────────────────────────────────────────
   async getAllHistory(from: string, to: string) {
     const cacheKey = `${from}|${to}`;
@@ -498,7 +496,7 @@ export class AttendanceService {
             ]),
             fields: JSON.stringify([
               'name', 'employee', 'employee_name', 'log_type', 'time',
-              'custom_foto_absen', 'custom_signature', 'shift',
+              'custom_foto_absen', 'shift',
               'latitude', 'longitude',
             ]),
             order_by: 'time desc',
@@ -526,7 +524,6 @@ export class AttendanceService {
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
-      // Menarik Data Lembur
       const overtimeReq = firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Overtime Request`, {
           headers: { Authorization: authHeader },
@@ -536,6 +533,7 @@ export class AttendanceService {
               ['overtime_date', '<=', to],
               ['overtime_date', '>=', from],
             ]),
+            // Fields dikembalikan ke standar (tanpa rencana/aktual)
             fields: JSON.stringify(['name', 'employee', 'overtime_date', 'start_time', 'end_time', 'status']),
             limit_page_length: 1000,
           },
@@ -656,7 +654,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // PROXY FILE (untuk foto bukti izin)
+  // PROXY FILE
   // ─────────────────────────────────────────────────────────────────
   async proxyFile(filePath: string): Promise<{ buffer: Buffer; contentType: string }> {
     const { erpUrl, authHeader } = this.getAuth();
@@ -804,7 +802,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // HELPER: Invalidate cache izin (dipanggil setelah approve/reject/cancel)
+  // HELPER: Invalidate cache izin
   // ─────────────────────────────────────────────────────────────────
   private invalidateLeaveCache() {
     this.cachedAllLeaves = null;
@@ -812,7 +810,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // HELPER: Parse pesan error dari ERPNext _server_messages & exception
+  // HELPER: Parse error ERPNext
   // ─────────────────────────────────────────────────────────────────
   private parseErpError(error: any, fallback: string): string {
     const data = error.response?.data;
@@ -1102,7 +1100,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // FUNGSI UPDATE STATUS IZIN (APPROVE / REJECT)
+  // FUNGSI UPDATE STATUS IZIN
   // ─────────────────────────────────────────────────────────────────
   async updateLeaveStatus(docName: string, status: 'Approved' | 'Rejected') {
     const { erpUrl, authHeader } = this.getAuth();
@@ -1186,41 +1184,52 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // SUBMIT OVERTIME REQUEST (PENGAJUAN LEMBUR)
+  // SUBMIT OVERTIME REQUEST (INDIVIDU ATAU KELOMPOK)
   // ─────────────────────────────────────────────────────────────────
   async submitOvertimeRequest(data: any) {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
-      const payload = {
-        employee:      data.employee_id,
-        overtime_date: data.overtime_date,
-        start_time:    data.start_time,
-        end_time:      data.end_time,
-        description:   data.description,
-        status:        'Pending',
-        docstatus:     0, // Simpan sebagai Draft
-      };
+      const employees = Array.isArray(data.employee_id) ? data.employee_id : [data.employee_id];
 
-      const response = await firstValueFrom(
-        this.httpService.post(
-          `${erpUrl}/api/resource/Overtime Request`,
-          payload,
-          { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ).pipe(
-          retry({ count: 3, delay: (_, retryCount) => timer(retryCount * 1500) })
-        )
+      const results = await Promise.all(
+        employees.map(async (empId) => {
+          const payload = {
+            employee:      empId,
+            overtime_date: data.overtime_date,
+            start_time:    data.start_time,
+            end_time:      data.end_time,
+            description:   data.description,
+            status:        'Pending',
+            docstatus:     0, 
+          };
+
+          const response = await firstValueFrom(
+            this.httpService.post(
+              `${erpUrl}/api/resource/Overtime Request`,
+              payload,
+              { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+            ).pipe(
+              retry({ count: 3, delay: (_, retryCount) => timer(retryCount * 1500) })
+            )
+          );
+          return response.data.data;
+        })
       );
 
-      return { success: true, message: 'Lembur berhasil diajukan.', data: response.data.data };
+      return { 
+        success: true, 
+        message: `Lembur berhasil diajukan untuk ${employees.length} karyawan.`, 
+        data: results 
+      };
     } catch (error: any) {
       console.error('[Overtime] Gagal:', error.response?.data || error.message);
-      throw new HttpException('Gagal mengajukan lembur.', HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException('Gagal mengajukan lembur. Pastikan data terisi dengan benar.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET OVERTIME HISTORY (RIWAYAT LEMBUR KARYAWAN)
+  // GET OVERTIME HISTORY 
   // ─────────────────────────────────────────────────────────────────
   async getOvertimeHistory(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -1232,7 +1241,7 @@ export class AttendanceService {
             filters: JSON.stringify([['employee', '=', employeeId]]),
             fields: JSON.stringify([
               'name', 'overtime_date', 'start_time', 'end_time',
-              'description', 'status', 'creation',
+              'description', 'status', 'creation'
             ]),
             order_by:          'creation desc',
             limit_page_length: 20,

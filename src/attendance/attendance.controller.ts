@@ -52,7 +52,6 @@ export class AttendanceController {
     return this.attendanceService.getLeaveHistory(employeeId);
   }
 
-  // Tarik SEMUA izin / cuti sekaligus untuk optimasi HR Dashboard
   @Get('all-leave-requests')
   async getAllLeaveRequests() {
     return this.attendanceService.getAllLeaveRequests();
