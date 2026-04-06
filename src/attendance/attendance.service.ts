@@ -11,6 +11,8 @@ export class AttendanceService {
   private cachedAllLeaves: { data: any; time: number } | null = null;
   // Cache getAllHistory: key = "from|to"
   private cachedAllHistory: Map<string, { data: any; time: number }> = new Map();
+  // Cache shift locations: key = shift_name
+  private cachedShiftLocations: Map<string, { data: any; time: number }> = new Map();
 
   // REVISI: TTL shift diturunkan drastis (5 menit → 2 menit) agar
   // shift type baru yang ditambahkan HRD di ERPNext lebih cepat
@@ -631,6 +633,105 @@ export class AttendanceService {
       return { success: true, data: response.data.data };
     } catch {
       throw new HttpException('Gagal mengambil daftar Shift dari ERPNext.', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // GET SHIFT LOCATIONS
+  // Menarik field `location` dari Shift Type ERPNext, lalu resolve
+  // koordinat dari doctype `Location` (Shift Location).
+  // Response: { success, locations: [{ nama, lat, lng, radius }] }
+  //
+  // ERPNext menyimpan lokasi shift di Shift Type → field `location`
+  // (linked ke doctype Location). Setiap Location punya:
+  //   - location_name  (nama tampil)
+  //   - latitude / longitude
+  //   - geofencing_radius (opsional, default 100m)
+  // ─────────────────────────────────────────────────────────────────
+  async getShiftLocations(shiftName: string) {
+    const now = Date.now();
+    const cached = this.cachedShiftLocations.get(shiftName);
+    if (cached && (now - cached.time < this.SHIFT_CACHE_TTL)) {
+      return { success: true, locations: cached.data };
+    }
+
+    const { erpUrl, authHeader } = this.getAuth();
+
+    try {
+      // Step 1: Ambil detail Shift Type untuk mendapatkan nama Location
+      const shiftRes = await firstValueFrom(
+        this.httpService.get(
+          `${erpUrl}/api/resource/Shift Type/${encodeURIComponent(shiftName)}`,
+          { headers: { Authorization: authHeader } },
+        ).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
+      );
+
+      const shiftData = shiftRes.data?.data;
+
+      // ERPNext Shift Type menyimpan lokasi di field `location`
+      // (bisa berupa string nama Location atau array child table)
+      const locationName: string | null =
+        shiftData?.location || shiftData?.shift_location || null;
+
+      if (!locationName) {
+        // Shift ini tidak punya lokasi yang di-set di ERPNext
+        return { success: true, locations: [] };
+      }
+
+      // Step 2: Resolve koordinat dari doctype Location
+      const locRes = await firstValueFrom(
+        this.httpService.get(
+          `${erpUrl}/api/resource/Location/${encodeURIComponent(locationName)}`,
+          { headers: { Authorization: authHeader } },
+        ).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
+      );
+
+      const loc = locRes.data?.data;
+
+      // Koordinat bisa tersimpan langsung atau dalam GeoJSON point
+      let lat: number | null = null;
+      let lng: number | null = null;
+
+      if (loc?.latitude && loc?.longitude) {
+        lat = parseFloat(loc.latitude);
+        lng = parseFloat(loc.longitude);
+      } else if (loc?.location) {
+        // GeoJSON format: { type: "Point", coordinates: [lng, lat] }
+        try {
+          const geo = typeof loc.location === 'string' ? JSON.parse(loc.location) : loc.location;
+          if (geo?.type === 'Point' && Array.isArray(geo.coordinates)) {
+            lng = geo.coordinates[0];
+            lat = geo.coordinates[1];
+          } else if (geo?.features?.[0]?.geometry?.coordinates) {
+            // FeatureCollection format
+            const coords = geo.features[0].geometry.coordinates;
+            lng = coords[0];
+            lat = coords[1];
+          }
+        } catch { /* tidak bisa parse GeoJSON */ }
+      }
+
+      if (lat === null || lng === null || isNaN(lat) || isNaN(lng)) {
+        console.warn(`[ShiftLocations] Koordinat tidak ditemukan untuk Location: ${locationName}`);
+        return { success: true, locations: [] };
+      }
+
+      const radius = parseFloat(loc?.geofencing_radius || loc?.radius || '100') || 100;
+
+      const result = [{
+        nama:   loc.location_name || locationName,
+        lat,
+        lng,
+        radius,
+      }];
+
+      this.cachedShiftLocations.set(shiftName, { data: result, time: now });
+      return { success: true, locations: result };
+
+    } catch (error: any) {
+      console.error('[getShiftLocations] Error:', error.response?.data || error.message);
+      // Kembalikan array kosong (bukan error) agar frontend bisa fallback
+      return { success: true, locations: [] };
     }
   }
 
