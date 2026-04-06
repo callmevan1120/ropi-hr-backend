@@ -503,7 +503,7 @@ export class AttendanceService {
             ]),
             fields: JSON.stringify([
               'name', 'employee', 'employee_name', 'log_type', 'time',
-              'custom_foto_absen', 'shift',
+              'custom_foto_absen', 'custom_verification_image', 'shift',
               'latitude', 'longitude',
             ]),
             order_by:          'time desc',
