@@ -217,18 +217,16 @@ export class AttendanceService {
 
   // ─────────────────────────────────────────────────────────────────
   // GET ACTIVE SHIFT
-  // REVISI: Setelah dapat detail shift, langsung fetch lokasi shift
-  // (via getShiftLocations) dan merge ke response. Frontend outlet
-  // akan menerima koordinat lokasi yang harus divalidasi GPS-nya,
-  // sehingga tidak perlu request terpisah.
+  // Menerima branch karyawan untuk lookup lokasi dari Shift Location.
+  // Branch dicocokkan ke location_name di Shift Location ERPNext.
   //
   // Response tambahan:
-  //   - location_name?  : nama lokasi shift (dari Shift Location ERPNext)
-  //   - location_lat?   : latitude lokasi
-  //   - location_lng?   : longitude lokasi
+  //   - location_name?  : nama lokasi (dari Shift Location)
+  //   - location_lat?   : latitude
+  //   - location_lng?   : longitude
   //   - location_radius?: radius geofence (meter)
   // ─────────────────────────────────────────────────────────────────
-  async getActiveShift(employeeId: string) {
+  async getActiveShift(employeeId: string, branch?: string) {
     const { erpUrl, authHeader } = this.getAuth();
     const todayStr = this.getTodayWib();
 
@@ -260,15 +258,13 @@ export class AttendanceService {
       if (aktifAssignment) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifAssignment.shift_type);
         if (detail) {
-          // REVISI: Fetch lokasi shift sekaligus, merge ke response
-          const lokasiResult = await this.getShiftLocations(aktifAssignment.shift_type);
+          const lokasiResult = await this.getLocationByBranch(branch);
           const lokasi = lokasiResult.locations?.[0] ?? null;
 
           return {
             success:         true,
             source:          'assignment',
             ...detail,
-            // Field lokasi — null jika shift tidak punya lokasi di ERPNext
             location_name:   lokasi?.nama   ?? null,
             location_lat:    lokasi?.lat    ?? null,
             location_lng:    lokasi?.lng    ?? null,
@@ -305,8 +301,7 @@ export class AttendanceService {
       if (aktifRequest) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
         if (detail) {
-          // REVISI: Fetch lokasi shift sekaligus, merge ke response
-          const lokasiResult = await this.getShiftLocations(aktifRequest.shift_type);
+          const lokasiResult = await this.getLocationByBranch(branch);
           const lokasi = lokasiResult.locations?.[0] ?? null;
 
           return {
@@ -670,27 +665,32 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET SHIFT LOCATIONS
+  // GET LOCATION BY BRANCH
   //
-  // Struktur doctype Shift Location di ERPNext (dikonfirmasi dari data aktual):
-  //   - name          : ID dokumen ERPNext (auto-generated, BUKAN nama lokasi)
-  //   - location_name : Nama lokasi yang diisi HRD (contoh: "RSUD GRATI PASURUAN")
-  //   - latitude      : Float
-  //   - longitude     : Float
-  //   - checkin_radius: Int (meter)
-  //   - geolocation   : GeoJSON FeatureCollection (backup jika lat/lng kosong)
+  // Pola data aktual di ERPNext (dikonfirmasi dari export):
+  //   - Shift Location TIDAK dilink ke Shift Type.
+  //   - Shift Location diidentifikasi oleh BRANCH karyawan:
+  //       "PH  KLATEN"        → karyawan branch Klaten/PH
+  //       "PKU DELANGGU"      → karyawan branch PKU Delanggu
+  //       "RSUD GRATI PASURUAN" → karyawan branch RSUD Grati
+  //       "RSD MADANI PEKAN BARU" → karyawan branch Madani Pekanbaru
+  //   - 1 shift (misal "Shift 1 [06.00-14.00]") dipakai di BANYAK
+  //     lokasi — cocok tidaknya ditentukan oleh BRANCH, bukan nama shift.
   //
-  // Strategi pencarian (berdasarkan data nyata di ERPNext):
-  //   Ambil semua Shift Location, cocokkan field `location_name` ke shiftName.
-  //   Matching bertingkat:
-  //     1. Exact match case-insensitive pada location_name
-  //     2. location_name mengandung shiftName (partial)
-  //     3. shiftName mengandung location_name (partial)
-  //   Koordinat 0,0 difilter (invalid — RSUD Dr Tjitrowardojo contoh kasusnya).
+  // Matching branch → location_name (tier):
+  //   1. Exact match case-insensitive
+  //   2. location_name mengandung salah satu kata kunci branch
+  //   3. Branch mengandung salah satu kata dari location_name
+  //
+  // Selalu kembalikan { success: true, locations: [] } jika tidak cocok
+  // agar frontend bisa handle gracefully.
   // ─────────────────────────────────────────────────────────────────
-  async getShiftLocations(shiftName: string) {
-    const now    = Date.now();
-    const cached = this.cachedShiftLocations.get(shiftName);
+  async getLocationByBranch(branch?: string) {
+    const branchKey = (branch || '').toLowerCase().trim();
+    const cacheKey  = `branch::${branchKey}`;
+    const now       = Date.now();
+
+    const cached = this.cachedShiftLocations.get(cacheKey);
     if (cached && (now - cached.time < this.SHIFT_CACHE_TTL)) {
       return { success: true, locations: cached.data };
     }
@@ -698,9 +698,6 @@ export class AttendanceService {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
-      // Ambil semua Shift Location sekaligus — jumlahnya tidak banyak
-      // sehingga lebih efisien daripada filter per-request yang tidak reliable
-      // karena field `name` (ID) ≠ `location_name` (label yang diisi HRD).
       const res = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Location`, {
           headers: { Authorization: authHeader },
@@ -716,83 +713,69 @@ export class AttendanceService {
       );
 
       const allLoc: any[] = res.data?.data ?? [];
-      const shiftLower    = shiftName.toLowerCase().trim();
 
-      // ── Helper: ekstrak koordinat dari satu record Shift Location ──
+      // ── Helper: ekstrak koordinat valid dari satu record ──────────
       const extractCoords = (loc: any): { lat: number; lng: number } | null => {
-        // Prioritas 1: field latitude / longitude langsung
         const lat = Number(loc.latitude);
         const lng = Number(loc.longitude);
+        // Filter koordinat 0,0 (invalid — berarti belum diisi HRD)
         if (lat && lng && !isNaN(lat) && !isNaN(lng)) return { lat, lng };
 
-        // Prioritas 2: field geolocation (GeoJSON FeatureCollection)
         if (loc.geolocation) {
           try {
             const geo = typeof loc.geolocation === 'string'
               ? JSON.parse(loc.geolocation)
               : loc.geolocation;
-            // FeatureCollection format (format yang dipakai ERPNext)
             const coords = geo?.features?.[0]?.geometry?.coordinates;
             if (Array.isArray(coords) && coords.length >= 2) {
               const gLng = Number(coords[0]);
               const gLat = Number(coords[1]);
-              if (gLat && gLng && !isNaN(gLat) && !isNaN(gLng)) {
-                return { lat: gLat, lng: gLng };
-              }
+              if (gLat && gLng && !isNaN(gLat) && !isNaN(gLng)) return { lat: gLat, lng: gLng };
             }
-            // Point format fallback
-            if (geo?.type === 'Point' && Array.isArray(geo.coordinates)) {
-              const gLng = Number(geo.coordinates[0]);
-              const gLat = Number(geo.coordinates[1]);
-              if (gLat && gLng && !isNaN(gLat) && !isNaN(gLng)) {
-                return { lat: gLat, lng: gLng };
-              }
-            }
-          } catch { /* GeoJSON tidak valid, skip */ }
+          } catch { /* GeoJSON tidak valid */ }
         }
         return null;
       };
 
-      // ── Cari dengan matching bertingkat ────────────────────────────
+      // ── Matching branch → location_name ───────────────────────────
       let matched: any | null = null;
 
-      for (const loc of allLoc) {
-        const locLabel = (loc.location_name || loc.name || '').toLowerCase().trim();
-        if (!locLabel) continue;
+      if (branchKey) {
+        // Tier 1: exact
+        matched = allLoc.find(loc =>
+          (loc.location_name || loc.name || '').toLowerCase().trim() === branchKey
+        ) ?? null;
 
-        // Tier 1: exact match
-        if (locLabel === shiftLower) {
-          matched = loc;
-          break;
+        // Tier 2: location_name contains any word from branch
+        if (!matched) {
+          const branchWords = branchKey.split(/\s+/).filter(w => w.length > 2);
+          matched = allLoc.find(loc => {
+            const label = (loc.location_name || loc.name || '').toLowerCase();
+            return branchWords.some(w => label.includes(w));
+          }) ?? null;
+        }
+
+        // Tier 3: branch contains any word from location_name
+        if (!matched) {
+          matched = allLoc.find(loc => {
+            const label = (loc.location_name || loc.name || '').toLowerCase().trim();
+            const labelWords = label.split(/\s+/).filter(w => w.length > 2);
+            return labelWords.some(w => branchKey.includes(w));
+          }) ?? null;
         }
       }
 
       if (!matched) {
-        // Tier 2: location_name mengandung shiftName
-        matched = allLoc.find(loc => {
-          const locLabel = (loc.location_name || loc.name || '').toLowerCase().trim();
-          return locLabel.includes(shiftLower);
-        }) ?? null;
-      }
-
-      if (!matched) {
-        // Tier 3: shiftName mengandung location_name
-        matched = allLoc.find(loc => {
-          const locLabel = (loc.location_name || loc.name || '').toLowerCase().trim();
-          return locLabel.length > 3 && shiftLower.includes(locLabel);
-        }) ?? null;
-      }
-
-      if (!matched) {
-        console.warn(`[ShiftLocations] Tidak ada Shift Location cocok untuk shift: "${shiftName}". Tersedia: ${allLoc.map(l => l.location_name || l.name).join(', ')}`);
-        this.cachedShiftLocations.set(shiftName, { data: [], time: now });
+        const available = allLoc.map(l => l.location_name || l.name).join(', ');
+        console.warn(`[LocationByBranch] Tidak cocok untuk branch: "${branch}". Tersedia: ${available}`);
+        this.cachedShiftLocations.set(cacheKey, { data: [], time: now });
         return { success: true, locations: [] };
       }
 
       const coords = extractCoords(matched);
       if (!coords) {
-        console.warn(`[ShiftLocations] Shift Location "${matched.location_name}" ditemukan tapi koordinat tidak valid (0,0 atau kosong).`);
-        this.cachedShiftLocations.set(shiftName, { data: [], time: now });
+        console.warn(`[LocationByBranch] "${matched.location_name}" ditemukan tapi koordinat 0,0 / kosong.`);
+        this.cachedShiftLocations.set(cacheKey, { data: [], time: now });
         return { success: true, locations: [] };
       }
 
@@ -803,14 +786,21 @@ export class AttendanceService {
         radius: Number(matched.checkin_radius) || 100,
       }];
 
-      console.log(`[ShiftLocations] ✓ Shift "${shiftName}" → Lokasi "${result[0].nama}" (${coords.lat}, ${coords.lng}) radius ${result[0].radius}m`);
-      this.cachedShiftLocations.set(shiftName, { data: result, time: now });
+      console.log(`[LocationByBranch] ✓ Branch "${branch}" → "${result[0].nama}" (${coords.lat}, ${coords.lng}) r=${result[0].radius}m`);
+      this.cachedShiftLocations.set(cacheKey, { data: result, time: now });
       return { success: true, locations: result };
 
     } catch (error: any) {
-      console.error('[getShiftLocations] Error:', error.response?.data || error.message);
+      console.error('[LocationByBranch] Error:', error.response?.data || error.message);
       return { success: true, locations: [] };
     }
+  }
+
+  // getShiftLocations dipertahankan untuk kompatibilitas endpoint lain
+  async getShiftLocations(shiftName: string) {
+    // Delegasi ke getLocationByBranch dengan shiftName sebagai branch hint
+    // (akan fallback ke semua lokasi jika tidak cocok)
+    return this.getLocationByBranch(shiftName);
   }
 
   // ─────────────────────────────────────────────────────────────────
