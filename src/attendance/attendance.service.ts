@@ -11,9 +11,14 @@ export class AttendanceService {
   private cachedAllLeaves: { data: any; time: number } | null = null;
   // Cache getAllHistory: key = "from|to"
   private cachedAllHistory: Map<string, { data: any; time: number }> = new Map();
-  private readonly CACHE_TTL = 60 * 60 * 1000;       // 1 jam untuk data statis
-  private readonly HISTORY_CACHE_TTL = 2 * 60 * 1000; // 2 menit untuk data absensi
-  private readonly LEAVE_CACHE_TTL = 3 * 60 * 1000;   // 3 menit untuk data izin
+
+  // REVISI: TTL shift diturunkan drastis (5 menit → 2 menit) agar
+  // shift type baru yang ditambahkan HRD di ERPNext lebih cepat
+  // terdeteksi tanpa harus restart server.
+  private readonly SHIFT_CACHE_TTL   = 2 * 60 * 1000;  // 2 menit (sebelumnya 1 jam)
+  private readonly CACHE_TTL         = 60 * 60 * 1000;  // 1 jam  (untuk data statis lain)
+  private readonly HISTORY_CACHE_TTL = 2 * 60 * 1000;   // 2 menit
+  private readonly LEAVE_CACHE_TTL   = 3 * 60 * 1000;   // 3 menit
 
   constructor(
     private readonly httpService: HttpService,
@@ -54,8 +59,8 @@ export class AttendanceService {
     const isRamadhan = /ramadhan/i.test(name);
     const isJakarta  = /jakarta/i.test(name);
 
-    const hariPart   = isFriday ? 'Jumat' : 'Senin - Kamis';
-    const branchPart = isJakarta ? 'Jakarta' : 'PH Klaten';
+    const hariPart    = isFriday ? 'Jumat' : 'Senin - Kamis';
+    const branchPart  = isJakarta ? 'Jakarta' : 'PH Klaten';
     const periodePart = isRamadhan ? 'Ramadhan' : 'Non Ramadhan';
 
     return `${hariPart} (${branchPart} ${periodePart})`;
@@ -91,14 +96,14 @@ export class AttendanceService {
           headers: { Authorization: authHeader },
           params: {
             filters: JSON.stringify([
-              ['employee',    '=',  employeeId],
-              ['shift_type',  '=',  shiftType],
-              ['start_date',  '<=', dateStr],
-              ['docstatus',   'in', [0, 1]],
+              ['employee',   '=',  employeeId],
+              ['shift_type', '=',  shiftType],
+              ['start_date', '<=', dateStr],
+              ['docstatus',  'in', [0, 1]],
             ]),
             fields:            JSON.stringify(['name', 'start_date', 'end_date', 'docstatus']),
             limit_page_length: 50,
-            _t: Date.now(), 
+            _t: Date.now(),
           },
         }).pipe(
           retry({
@@ -142,7 +147,7 @@ export class AttendanceService {
         employee:   employeeId,
         shift_type: shiftType,
         start_date: dateStr,
-        end_date:   dateStr, 
+        end_date:   dateStr,
         docstatus:  0,
       };
 
@@ -231,14 +236,14 @@ export class AttendanceService {
             fields:            JSON.stringify(['name', 'shift_type', 'start_date', 'end_date']),
             order_by:          'start_date desc',
             limit_page_length: 50,
-            _t: Date.now(), 
+            _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
       const assignments: any[] = assignRes.data.data ?? [];
       const aktifAssignment = assignments.find((a) => {
-        if (!a.end_date) return true; 
+        if (!a.end_date) return true;
         return a.end_date >= todayStr;
       });
 
@@ -260,14 +265,14 @@ export class AttendanceService {
             fields:            JSON.stringify(['name', 'shift_type', 'from_date', 'to_date']),
             order_by:          'from_date desc',
             limit_page_length: 50,
-            _t: Date.now(), 
+            _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
       const requests: any[] = reqRes.data.data ?? [];
       const aktifRequest = requests.find((r) => {
-        if (!r.to_date) return true; 
+        if (!r.to_date) return true;
         return r.to_date >= todayStr;
       });
 
@@ -298,15 +303,15 @@ export class AttendanceService {
       const matches = base64Data.match(/^data:([A-Za-z0-9+\/]+\/[A-Za-z0-9+\/]+);base64,(.+)$/);
       if (!matches) return null;
 
-      const mimeType = matches[1];
+      const mimeType   = matches[1];
       const fileBuffer = Buffer.from(matches[2], 'base64');
       const extMap: Record<string, string> = {
         'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png',
-        'image/gif': 'gif', 'image/webp': 'webp',
+        'image/gif':  'gif', 'image/webp': 'webp',
       };
-      const ext = extMap[mimeType] ?? 'jpg';
+      const ext          = extMap[mimeType] ?? 'jpg';
       const safeFileName = `${fileNamePrefix}_${Date.now()}.${ext}`;
-      const boundary = `----FormBoundary${Date.now()}`;
+      const boundary     = `----FormBoundary${Date.now()}`;
 
       const beforeFile = [
         `--${boundary}`,
@@ -332,8 +337,8 @@ export class AttendanceService {
       const res = await firstValueFrom(
         this.httpService.post(`${erpUrl}/api/method/upload_file`, bodyBuffer, {
           headers: {
-            Authorization: authHeader,
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            Authorization:   authHeader,
+            'Content-Type':  `multipart/form-data; boundary=${boundary}`,
             'Content-Length': bodyBuffer.length.toString(),
           },
         }).pipe(
@@ -341,10 +346,10 @@ export class AttendanceService {
             count: 3,
             delay: (error, retryCount) => {
               if (error.response && error.response.status >= 400 && error.response.status < 500) {
-                return throwError(() => error); 
+                return throwError(() => error);
               }
               console.warn(`[Auto-Retry] Server ERP sibuk saat upload foto, mencoba ulang ke-${retryCount}...`);
-              return timer(retryCount * 1500); 
+              return timer(retryCount * 1500);
             }
           })
         )
@@ -388,7 +393,7 @@ export class AttendanceService {
 
       const [fotoAbsenUrl, fotoKiriUrl] = await Promise.all([
         this.uploadBase64ToERPNext(erpUrl, authHeader, data.image_verification, `Absen_${data.employee_id}_Depan`),
-        this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_verification_image, `Absen_${data.employee_id}_Kiri`)
+        this.uploadBase64ToERPNext(erpUrl, authHeader, data.custom_verification_image, `Absen_${data.employee_id}_Kiri`),
       ]);
 
       const payload: any = {
@@ -397,8 +402,8 @@ export class AttendanceService {
         time:                      timeString,
         latitude:                  data.latitude,
         longitude:                 data.longitude,
-        custom_foto_absen:         fotoAbsenUrl || data.image_verification, 
-        custom_verification_image: fotoKiriUrl || data.custom_verification_image,
+        custom_foto_absen:         fotoAbsenUrl || data.image_verification,
+        custom_verification_image: fotoKiriUrl  || data.custom_verification_image,
         shift:                     shiftName,
         device_id:                 'RopiHR-PWA',
       };
@@ -416,16 +421,16 @@ export class AttendanceService {
                 return throwError(() => error);
               }
               console.warn(`[Auto-Retry] Server ERP sibuk saat proses absen, mencoba ulang ke-${retryCount}...`);
-              return timer(retryCount * 1500); 
+              return timer(retryCount * 1500);
             }
           })
         )
       );
 
       return {
-        success:               true,
-        message:               `Absen ${logType === 'IN' ? 'MASUK' : 'KELUAR'} berhasil!`,
-        data:                  response.data.data,
+        success:                  true,
+        message:                  `Absen ${logType === 'IN' ? 'MASUK' : 'KELUAR'} berhasil!`,
+        data:                     response.data.data,
         shift_assignment_created: shiftAssignmentInfo.created,
         shift_assignment_doc:     shiftAssignmentInfo.docName,
       };
@@ -462,7 +467,7 @@ export class AttendanceService {
             ]),
             order_by:          'time desc',
             limit_page_length: 100,
-            _t: Date.now(), 
+            _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
@@ -477,8 +482,8 @@ export class AttendanceService {
   // ─────────────────────────────────────────────────────────────────
   async getAllHistory(from: string, to: string) {
     const cacheKey = `${from}|${to}`;
-    const now = Date.now();
-    const cached = this.cachedAllHistory.get(cacheKey);
+    const now      = Date.now();
+    const cached   = this.cachedAllHistory.get(cacheKey);
     if (cached && (now - cached.time < this.HISTORY_CACHE_TTL)) {
       return { success: true, data: cached.data };
     }
@@ -499,7 +504,7 @@ export class AttendanceService {
               'custom_foto_absen', 'shift',
               'latitude', 'longitude',
             ]),
-            order_by: 'time desc',
+            order_by:          'time desc',
             limit_page_length: 2000,
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
@@ -512,13 +517,13 @@ export class AttendanceService {
             filters: JSON.stringify([
               ['docstatus', 'in', [0, 1]],
               ['from_date', '<=', to],
-              ['to_date', '>=', from],
+              ['to_date',   '>=', from],
             ]),
             fields: JSON.stringify([
               'name', 'employee', 'employee_name', 'leave_type', 'from_date', 'to_date',
-              'description', 'status', 'total_leave_days'
+              'description', 'status', 'total_leave_days',
             ]),
-            order_by: 'from_date desc',
+            order_by:          'from_date desc',
             limit_page_length: 1000,
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
@@ -529,12 +534,11 @@ export class AttendanceService {
           headers: { Authorization: authHeader },
           params: {
             filters: JSON.stringify([
-              ['docstatus', 'in', [0, 1]],
+              ['docstatus',     'in', [0, 1]],
               ['overtime_date', '<=', to],
               ['overtime_date', '>=', from],
             ]),
-            // Fields dikembalikan ke standar (tanpa rencana/aktual)
-            fields: JSON.stringify(['name', 'employee', 'overtime_date', 'start_time', 'end_time', 'status']),
+            fields:            JSON.stringify(['name', 'employee', 'overtime_date', 'start_time', 'end_time', 'status']),
             limit_page_length: 1000,
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
@@ -542,12 +546,12 @@ export class AttendanceService {
 
       const [absenRes, leaveRes, overtimeRes] = await Promise.all([
         absensiReq.catch(() => ({ data: { data: [] } })),
-        leaveReq.catch(() => ({ data: { data: [] } })),
-        overtimeReq.catch(() => ({ data: { data: [] } }))
+        leaveReq.catch(  () => ({ data: { data: [] } })),
+        overtimeReq.catch(() => ({ data: { data: [] } })),
       ]);
 
-      const dataAbsensi = absenRes.data?.data || [];
-      const dataCuti    = leaveRes.data?.data || [];
+      const dataAbsensi = absenRes.data?.data  || [];
+      const dataCuti    = leaveRes.data?.data   || [];
       const dataLembur  = overtimeRes.data?.data || [];
 
       let leaveWithFiles = dataCuti;
@@ -559,10 +563,10 @@ export class AttendanceService {
               headers: { Authorization: authHeader },
               params: {
                 filters: JSON.stringify([
-                  ['attached_to_doctype', '=', 'Leave Application'],
-                  ['attached_to_name', 'in', docNames],
+                  ['attached_to_doctype', '=',  'Leave Application'],
+                  ['attached_to_name',    'in', docNames],
                 ]),
-                fields: JSON.stringify(['name', 'file_url', 'attached_to_name']),
+                fields:            JSON.stringify(['name', 'file_url', 'attached_to_name']),
                 limit_page_length: 1000,
               },
             }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
@@ -574,7 +578,7 @@ export class AttendanceService {
           });
           leaveWithFiles = dataCuti.map((l: any) => ({
             ...l,
-            attachment: attachmentMap[l.name] || null
+            attachment: attachmentMap[l.name] || null,
           }));
         } catch (e) {
           console.warn('Gagal menarik file cuti');
@@ -597,10 +601,13 @@ export class AttendanceService {
 
   // ─────────────────────────────────────────────────────────────────
   // GET SHIFTS
+  // REVISI: Gunakan SHIFT_CACHE_TTL (2 menit) bukan CACHE_TTL (1 jam).
+  // Tambah query param `order_by` dan `limit_page_length` eksplisit
+  // agar semua shift type terbaru di ERPNext selalu ikut terambil.
   // ─────────────────────────────────────────────────────────────────
   async getShifts() {
     const now = Date.now();
-    if (this.cachedShifts && (now - this.cachedShifts.time < this.CACHE_TTL)) {
+    if (this.cachedShifts && (now - this.cachedShifts.time < this.SHIFT_CACHE_TTL)) {
       return { success: true, data: this.cachedShifts.data };
     }
 
@@ -612,8 +619,11 @@ export class AttendanceService {
           headers: { Authorization: authHeader },
           params: {
             fields:            JSON.stringify(['name', 'start_time', 'end_time', 'color']),
-            limit_page_length: 100,
-            _t: Date.now(), 
+            order_by:          'name asc',
+            // REVISI: Naikkan limit agar shift type baru tidak terpotong.
+            // Nilai 200 lebih dari cukup untuk kebanyakan setup ERPNext.
+            limit_page_length: 200,
+            _t: Date.now(), // cache-busting agar ERPNext tidak serve stale response
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
@@ -622,6 +632,15 @@ export class AttendanceService {
     } catch {
       throw new HttpException('Gagal mengambil daftar Shift dari ERPNext.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // INVALIDATE SHIFT CACHE (bisa dipanggil dari controller jika perlu)
+  // REVISI: Ditambahkan endpoint baru untuk force-refresh shift list
+  // dari luar (misal oleh HRD setelah menambah shift type baru).
+  // ─────────────────────────────────────────────────────────────────
+  invalidateShiftCache() {
+    this.cachedShifts = null;
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -642,7 +661,7 @@ export class AttendanceService {
           params: {
             fields:            JSON.stringify(['name']),
             limit_page_length: 50,
-            _t: Date.now(), 
+            _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
@@ -682,17 +701,17 @@ export class AttendanceService {
         this.httpService.get(`${erpUrl}/api/resource/Leave Application`, {
           headers: { Authorization: authHeader },
           params: {
-            filters:           JSON.stringify([
-              ['employee', '=', employeeId],
-              ['docstatus', 'in', [0, 1]], 
+            filters: JSON.stringify([
+              ['employee',  '=',  employeeId],
+              ['docstatus', 'in', [0, 1]],
             ]),
-            fields:            JSON.stringify([
+            fields: JSON.stringify([
               'name', 'leave_type', 'from_date', 'to_date',
               'description', 'status', 'total_leave_days',
             ]),
             order_by:          'from_date desc',
             limit_page_length: 50,
-            _t: Date.now(), 
+            _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
@@ -750,24 +769,24 @@ export class AttendanceService {
           headers: { Authorization: authHeader },
           params: {
             filters: JSON.stringify([
-              ['docstatus', 'in', [0, 1]], 
+              ['docstatus', 'in', [0, 1]],
             ]),
             fields: JSON.stringify([
               'name', 'employee', 'employee_name', 'leave_type', 'from_date', 'to_date',
-              'description', 'status', 'total_leave_days'
+              'description', 'status', 'total_leave_days',
             ]),
-            order_by: 'creation desc',
+            order_by:          'creation desc',
             limit_page_length: 500,
-            _t: Date.now(), 
+            _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
-      
+
       const leaveList: any[] = res.data.data ?? [];
       if (leaveList.length === 0) return { success: true, data: [] };
 
       const docNames = leaveList.map((l) => l.name);
-      const fileRes = await firstValueFrom(
+      const fileRes  = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/File`, {
           headers: { Authorization: authHeader },
           params: {
@@ -775,7 +794,7 @@ export class AttendanceService {
               ['attached_to_doctype', '=',  'Leave Application'],
               ['attached_to_name',    'in', docNames],
             ]),
-            fields: JSON.stringify(['name', 'file_url', 'attached_to_name']),
+            fields:            JSON.stringify(['name', 'file_url', 'attached_to_name']),
             limit_page_length: 500,
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
@@ -864,7 +883,7 @@ export class AttendanceService {
         from_date:      data.from_date,
         to_date:        data.to_date,
         description:    data.reason,
-        leave_approver: defaultApprover, 
+        leave_approver: defaultApprover,
         status:         'Open',
         docstatus:      0,
       };
@@ -940,8 +959,8 @@ export class AttendanceService {
           await firstValueFrom(
             this.httpService.post(`${erpUrl}/api/method/upload_file`, bodyBuffer, {
               headers: {
-                Authorization:   authHeader,
-                'Content-Type':  `multipart/form-data; boundary=${boundary}`,
+                Authorization:    authHeader,
+                'Content-Type':   `multipart/form-data; boundary=${boundary}`,
                 'Content-Length': bodyBuffer.length.toString(),
               },
             }).pipe(retry({ count: 3, delay: (_, retryCount) => timer(retryCount * 1500) }))
@@ -959,12 +978,12 @@ export class AttendanceService {
       };
     } catch (error: any) {
       console.error('[submitLeaveRequest] Error:', JSON.stringify(error.response?.data || error.message));
-      
+
       const errMsg = this.parseErpError(
         error,
-        'Gagal menyimpan pengajuan cuti/izin. Silakan cek riwayat atau hubungi HRD.'
+        'Gagal menyimpan pengajuan cuti/izin. Silakan cek riwayat atau hubungi HRD.',
       );
-      
+
       throw new HttpException({ success: false, message: errMsg }, HttpStatus.BAD_REQUEST);
     }
   }
@@ -980,12 +999,10 @@ export class AttendanceService {
         this.httpService.get(`${erpUrl}/api/resource/User`, {
           headers: { Authorization: authHeader },
           params: {
-            filters: JSON.stringify([
-              ['role_profile_name', 'like', '%HR%'],
-            ]),
+            filters:           JSON.stringify([['role_profile_name', 'like', '%HR%']]),
             fields:            JSON.stringify(['name', 'email', 'full_name']),
             limit_page_length: 20,
-            _t: Date.now(), 
+            _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
@@ -1004,13 +1021,13 @@ export class AttendanceService {
 
     try {
       const payload = {
-        employee:        data.employee_id,
-        shift_type:      data.shift_type,
-        from_date:       data.from_date,
-        to_date:         data.to_date,
-        approver:        data.approver,
-        status:          'Draft',
-        docstatus:       0,
+        employee:  data.employee_id,
+        shift_type: data.shift_type,
+        from_date:  data.from_date,
+        to_date:    data.to_date,
+        approver:   data.approver,
+        status:     'Draft',
+        docstatus:  0,
       };
 
       const response = await firstValueFrom(
@@ -1037,14 +1054,14 @@ export class AttendanceService {
         this.httpService.get(`${erpUrl}/api/resource/Shift Request`, {
           headers: { Authorization: authHeader },
           params: {
-            filters: JSON.stringify([['employee', '=', employeeId]]),
-            fields: JSON.stringify([
+            filters:           JSON.stringify([['employee', '=', employeeId]]),
+            fields:            JSON.stringify([
               'name', 'shift_type', 'from_date', 'to_date',
               'status', 'docstatus', 'creation',
             ]),
             order_by:          'creation desc',
             limit_page_length: 20,
-            _t: Date.now(), 
+            _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
@@ -1128,10 +1145,10 @@ export class AttendanceService {
         this.httpService.post(
           `${erpUrl}/api/method/frappe.client.set_value`,
           {
-            doctype:  'Leave Application',
-            name:     docName,
+            doctype:   'Leave Application',
+            name:      docName,
             fieldname: 'status',
-            value:    status,
+            value:     status,
           },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
         ).pipe(retry({ count: 3, delay: (_, retryCount) => timer(retryCount * 1500) }))
@@ -1201,7 +1218,7 @@ export class AttendanceService {
             end_time:      data.end_time,
             description:   data.description,
             status:        'Pending',
-            docstatus:     0, 
+            docstatus:     0,
           };
 
           const response = await firstValueFrom(
@@ -1217,10 +1234,10 @@ export class AttendanceService {
         })
       );
 
-      return { 
-        success: true, 
-        message: `Lembur berhasil diajukan untuk ${employees.length} karyawan.`, 
-        data: results 
+      return {
+        success: true,
+        message: `Lembur berhasil diajukan untuk ${employees.length} karyawan.`,
+        data:    results,
       };
     } catch (error: any) {
       console.error('[Overtime] Gagal:', error.response?.data || error.message);
@@ -1229,7 +1246,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET OVERTIME HISTORY 
+  // GET OVERTIME HISTORY
   // ─────────────────────────────────────────────────────────────────
   async getOvertimeHistory(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -1238,10 +1255,10 @@ export class AttendanceService {
         this.httpService.get(`${erpUrl}/api/resource/Overtime Request`, {
           headers: { Authorization: authHeader },
           params: {
-            filters: JSON.stringify([['employee', '=', employeeId]]),
-            fields: JSON.stringify([
+            filters:           JSON.stringify([['employee', '=', employeeId]]),
+            fields:            JSON.stringify([
               'name', 'overtime_date', 'start_time', 'end_time',
-              'description', 'status', 'creation'
+              'description', 'status', 'creation',
             ]),
             order_by:          'creation desc',
             limit_page_length: 20,
