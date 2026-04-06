@@ -13,6 +13,8 @@ export class AttendanceService {
   private cachedAllHistory: Map<string, { data: any; time: number }> = new Map();
   // Cache shift locations: key = shift_name
   private cachedShiftLocations: Map<string, { data: any; time: number }> = new Map();
+  // Cache branch locations: key = branch_name
+  private cachedBranchLocations: Map<string, { data: any; time: number }> = new Map();
 
   // REVISI: TTL shift diturunkan drastis (5 menit → 2 menit) agar
   // shift type baru yang ditambahkan HRD di ERPNext lebih cepat
@@ -383,6 +385,36 @@ export class AttendanceService {
       if (shiftName && this.isOfficeShift(shiftName)) {
         shiftName = this.normalizeOfficeShiftName(shiftName);
       }
+
+      // ── VALIDASI LOKASI SERVER-SIDE ──────────────────────────────
+      // Validasi bahwa koordinat checkin berada dalam radius branch karyawan
+      // Hanya untuk checkin MASUK (IN), bukan untuk checkout (OUT)
+      const branch = data.branch ?? '';
+      if (logType === 'IN' && branch) {
+        const locationValidation = await this.validateCheckinLocation(
+          erpUrl,
+          authHeader,
+          data.employee_id,
+          data.latitude,
+          data.longitude,
+          branch,
+        );
+
+        if (!locationValidation.valid) {
+          throw new HttpException(
+            {
+              success: false,
+              message: `Lokasi tidak valid: ${locationValidation.message}`,
+              error_code: 'INVALID_LOCATION',
+            },
+            HttpStatus.BAD_REQUEST,
+          );
+        }
+
+        // Log valid location untuk audit trail
+        console.log(`[Checkin] Employee ${data.employee_id} di ${locationValidation.nearestLocation} (${locationValidation.distance}m dari branch)`);
+      }
+      // ──────────────────────────────────────────────────────────────
 
       let shiftAssignmentInfo: { created: boolean; docName: string | null; error?: string } =
         { created: false, docName: null };
@@ -927,6 +959,142 @@ export class AttendanceService {
   private invalidateLeaveCache() {
     this.cachedAllLeaves = null;
     this.cachedAllHistory.clear();
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // HELPER: Hitung jarak Haversine (meter) antara 2 koordinat
+  // ─────────────────────────────────────────────────────────────────
+  private haversineDistance(
+    lat1: number, lon1: number,
+    lat2: number, lon2: number,
+  ): number {
+    const R = 6371000; // Radius bumi dalam meter
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) *
+      Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // HELPER: Ambil lokasi branch dari ERPNext (Shift Location)
+  // ─────────────────────────────────────────────────────────────────
+  private async getBranchLocations(
+    erpUrl: string,
+    authHeader: string,
+    branchName: string,
+  ): Promise<Array<{ nama: string; lat: number; lng: number; radius: number }>> {
+    const now = Date.now();
+    const cached = this.cachedBranchLocations.get(branchName);
+    if (cached && (now - cached.time < this.SHIFT_CACHE_TTL)) {
+      return cached.data;
+    }
+
+    try {
+      // Ambil dari doctype Shift Location di ERPNext
+      const res = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Shift Location`, {
+          headers: { Authorization: authHeader },
+          params: {
+            filters: JSON.stringify([
+              ['name', 'like', `%${branchName}%`],
+            ]),
+            fields: JSON.stringify(['name', 'latitude', 'longitude', 'checkin_radius']),
+            limit_page_length: 20,
+            _t: Date.now(),
+          },
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
+      );
+
+      const locations: Array<{ nama: string; lat: number; lng: number; radius: number }> = [];
+      for (const loc of res.data.data ?? []) {
+        const lat = parseFloat(loc.latitude);
+        const lng = parseFloat(loc.longitude);
+        const radius = parseFloat(loc.checkin_radius) || 100;
+        if (!isNaN(lat) && !isNaN(lng)) {
+          locations.push({
+            nama: loc.name,
+            lat,
+            lng,
+            radius,
+          });
+        }
+      }
+
+      this.cachedBranchLocations.set(branchName, { data: locations, time: now });
+      return locations;
+    } catch (error: any) {
+      console.error(`[getBranchLocations] Error untuk ${branchName}:`, error.response?.data || error.message);
+      return [];
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // HELPER: Validasi lokasi checkin terhadap branch karyawan
+  // Returns: { valid: boolean; message: string; nearestLocation: string }
+  // ─────────────────────────────────────────────────────────────────
+  private async validateCheckinLocation(
+    erpUrl: string,
+    authHeader: string,
+    employeeId: string,
+    latitude: number,
+    longitude: number,
+    branch: string,
+  ): Promise<{ valid: boolean; message: string; nearestLocation: string; distance: number }> {
+    const DEFAULT_RADIUS = 200; // Default radius 200m jika tidak ada setting
+
+    // Jika koordinat tidak valid, tolak
+    if (latitude === undefined || latitude === null || longitude === undefined || longitude === null) {
+      return { valid: false, message: 'Koordinat GPS tidak valid.', nearestLocation: '', distance: 0 };
+    }
+
+    // Jika koordinat 0,0 (fallback saat GPS tidak tersedia), tolak untuk keamanan
+    if (latitude === 0 && longitude === 0) {
+      return { valid: false, message: 'GPS tidak terdeteksi. Aktifkan lokasi dan coba lagi.', nearestLocation: '', distance: 0 };
+    }
+
+    // Ambil lokasi branch dari ERPNext
+    const branchLocations = await this.getBranchLocations(erpUrl, authHeader, branch);
+
+    // Jika tidak ada lokasi branch di ERPNext, izinkan dengan warning
+    if (branchLocations.length === 0) {
+      console.warn(`[validateCheckinLocation] Tidak ada lokasi branch "${branch}" di ERPNext. Checkin diizinkan.`);
+      return { valid: true, message: '', nearestLocation: branch, distance: 0 };
+    }
+
+    // Cari lokasi branch terdekat
+    let nearestLocation = branchLocations[0];
+    let minDistance = this.haversineDistance(latitude, longitude, nearestLocation.lat, nearestLocation.lng);
+
+    for (const loc of branchLocations) {
+      const dist = this.haversineDistance(latitude, longitude, loc.lat, loc.lng);
+      if (dist < minDistance) {
+        minDistance = dist;
+        nearestLocation = loc;
+      }
+    }
+
+    const allowedRadius = nearestLocation.radius || DEFAULT_RADIUS;
+
+    if (minDistance <= allowedRadius) {
+      return {
+        valid: true,
+        message: '',
+        nearestLocation: nearestLocation.nama,
+        distance: Math.round(minDistance),
+      };
+    }
+
+    return {
+      valid: false,
+      message: `Anda berada ${Math.round(minDistance)}m dari ${nearestLocation.nama}. Maksimum ${allowedRadius}m dari lokasi branch.`,
+      nearestLocation: nearestLocation.nama,
+      distance: Math.round(minDistance),
+    };
   }
 
   // ─────────────────────────────────────────────────────────────────
