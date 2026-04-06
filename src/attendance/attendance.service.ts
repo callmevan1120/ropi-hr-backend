@@ -14,11 +14,8 @@ export class AttendanceService {
   // Cache shift locations: key = shift_name
   private cachedShiftLocations: Map<string, { data: any; time: number }> = new Map();
 
-  // REVISI: TTL shift diturunkan drastis (5 menit → 2 menit) agar
-  // shift type baru yang ditambahkan HRD di ERPNext lebih cepat
-  // terdeteksi tanpa harus restart server.
-  private readonly SHIFT_CACHE_TTL   = 2 * 60 * 1000;  // 2 menit (sebelumnya 1 jam)
-  private readonly CACHE_TTL         = 60 * 60 * 1000;  // 1 jam  (untuk data statis lain)
+  private readonly SHIFT_CACHE_TTL   = 2 * 60 * 1000;  // 2 menit
+  private readonly CACHE_TTL         = 60 * 60 * 1000;  // 1 jam
   private readonly HISTORY_CACHE_TTL = 2 * 60 * 1000;   // 2 menit
   private readonly LEAVE_CACHE_TTL   = 3 * 60 * 1000;   // 3 menit
 
@@ -220,12 +217,23 @@ export class AttendanceService {
 
   // ─────────────────────────────────────────────────────────────────
   // GET ACTIVE SHIFT
+  // REVISI: Setelah dapat detail shift, langsung fetch lokasi shift
+  // (via getShiftLocations) dan merge ke response. Frontend outlet
+  // akan menerima koordinat lokasi yang harus divalidasi GPS-nya,
+  // sehingga tidak perlu request terpisah.
+  //
+  // Response tambahan:
+  //   - location_name?  : nama lokasi shift (dari Shift Location ERPNext)
+  //   - location_lat?   : latitude lokasi
+  //   - location_lng?   : longitude lokasi
+  //   - location_radius?: radius geofence (meter)
   // ─────────────────────────────────────────────────────────────────
   async getActiveShift(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
     const todayStr = this.getTodayWib();
 
     try {
+      // ── Step 1: Cari Shift Assignment aktif ──────────────────────
       const assignRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Assignment`, {
           headers: { Authorization: authHeader },
@@ -251,9 +259,25 @@ export class AttendanceService {
 
       if (aktifAssignment) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifAssignment.shift_type);
-        if (detail) return { success: true, source: 'assignment', ...detail };
+        if (detail) {
+          // REVISI: Fetch lokasi shift sekaligus, merge ke response
+          const lokasiResult = await this.getShiftLocations(aktifAssignment.shift_type);
+          const lokasi = lokasiResult.locations?.[0] ?? null;
+
+          return {
+            success:         true,
+            source:          'assignment',
+            ...detail,
+            // Field lokasi — null jika shift tidak punya lokasi di ERPNext
+            location_name:   lokasi?.nama   ?? null,
+            location_lat:    lokasi?.lat    ?? null,
+            location_lng:    lokasi?.lng    ?? null,
+            location_radius: lokasi?.radius ?? null,
+          };
+        }
       }
 
+      // ── Step 2: Fallback ke Shift Request ────────────────────────
       const reqRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Request`, {
           headers: { Authorization: authHeader },
@@ -280,7 +304,21 @@ export class AttendanceService {
 
       if (aktifRequest) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
-        if (detail) return { success: true, source: 'request', ...detail };
+        if (detail) {
+          // REVISI: Fetch lokasi shift sekaligus, merge ke response
+          const lokasiResult = await this.getShiftLocations(aktifRequest.shift_type);
+          const lokasi = lokasiResult.locations?.[0] ?? null;
+
+          return {
+            success:         true,
+            source:          'request',
+            ...detail,
+            location_name:   lokasi?.nama   ?? null,
+            location_lat:    lokasi?.lat    ?? null,
+            location_lng:    lokasi?.lng    ?? null,
+            location_radius: lokasi?.radius ?? null,
+          };
+        }
       }
 
       return { success: false, message: 'Belum ada Shift. Silakan Ajukan Shift ke HRD.' };
@@ -603,9 +641,6 @@ export class AttendanceService {
 
   // ─────────────────────────────────────────────────────────────────
   // GET SHIFTS
-  // REVISI: Gunakan SHIFT_CACHE_TTL (2 menit) bukan CACHE_TTL (1 jam).
-  // Tambah query param `order_by` dan `limit_page_length` eksplisit
-  // agar semua shift type terbaru di ERPNext selalu ikut terambil.
   // ─────────────────────────────────────────────────────────────────
   async getShifts() {
     const now = Date.now();
@@ -622,10 +657,8 @@ export class AttendanceService {
           params: {
             fields:            JSON.stringify(['name', 'start_time', 'end_time', 'color']),
             order_by:          'name asc',
-            // REVISI: Naikkan limit agar shift type baru tidak terpotong.
-            // Nilai 200 lebih dari cukup untuk kebanyakan setup ERPNext.
             limit_page_length: 200,
-            _t: Date.now(), // cache-busting agar ERPNext tidak serve stale response
+            _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
@@ -638,18 +671,25 @@ export class AttendanceService {
 
   // ─────────────────────────────────────────────────────────────────
   // GET SHIFT LOCATIONS
-  // Menarik field `location` dari Shift Type ERPNext, lalu resolve
-  // koordinat dari doctype `Location` (Shift Location).
-  // Response: { success, locations: [{ nama, lat, lng, radius }] }
   //
-  // ERPNext menyimpan lokasi shift di Shift Type → field `location`
-  // (linked ke doctype Location). Setiap Location punya:
-  //   - location_name  (nama tampil)
-  //   - latitude / longitude
-  //   - geofencing_radius (opsional, default 100m)
+  // REVISI: Sebelumnya salah doctype — mencari ke `Location` via field
+  // `location` di Shift Type, padahal HRD menyimpan data lokasi di
+  // doctype `Shift Location` dengan field name yang sama persis dengan
+  // nama Shift Type (field: name, latitude, longitude, checkin_radius).
+  //
+  // Strategi baru (2-step, konsisten dengan locations.controller.ts):
+  //   Step 1 — Cari di Shift Location dengan filter name = shiftName.
+  //             Ini adalah cara utama: nama Shift Location = nama Shift Type.
+  //   Step 2 — Fallback: ambil semua Shift Location, cari yang namanya
+  //             mengandung kata kunci dari shift name (partial match).
+  //             Berguna jika penamaan tidak 100% identik.
+  //
+  // Response: { success: true, locations: [{ nama, lat, lng, radius }] }
+  // Selalu return success:true + locations:[] jika tidak ditemukan
+  // agar frontend bisa handle gracefully.
   // ─────────────────────────────────────────────────────────────────
   async getShiftLocations(shiftName: string) {
-    const now = Date.now();
+    const now    = Date.now();
     const cached = this.cachedShiftLocations.get(shiftName);
     if (cached && (now - cached.time < this.SHIFT_CACHE_TTL)) {
       return { success: true, locations: cached.data };
@@ -657,88 +697,82 @@ export class AttendanceService {
 
     const { erpUrl, authHeader } = this.getAuth();
 
+    const mapShiftLocation = (loc: any): { nama: string; lat: number; lng: number; radius: number } | null => {
+      const lat    = Number(loc.latitude);
+      const lng    = Number(loc.longitude);
+      const radius = Number(loc.checkin_radius) || 100;
+      if (!lat || !lng || isNaN(lat) || isNaN(lng)) return null;
+      return { nama: loc.name, lat, lng, radius };
+    };
+
     try {
-      // Step 1: Ambil detail Shift Type untuk mendapatkan nama Location
-      const shiftRes = await firstValueFrom(
-        this.httpService.get(
-          `${erpUrl}/api/resource/Shift Type/${encodeURIComponent(shiftName)}`,
-          { headers: { Authorization: authHeader } },
-        ).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
+      // ── Step 1: cari Shift Location dengan nama = shiftName (exact) ──
+      const exactRes = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Shift Location`, {
+          headers: { Authorization: authHeader },
+          params: {
+            filters:           JSON.stringify([['name', '=', shiftName]]),
+            fields:            JSON.stringify(['name', 'latitude', 'longitude', 'checkin_radius']),
+            limit_page_length: 1,
+            _t:                Date.now(),
+          },
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
-      const shiftData = shiftRes.data?.data;
-
-      // ERPNext Shift Type menyimpan lokasi di field `location`
-      // (bisa berupa string nama Location atau array child table)
-      const locationName: string | null =
-        shiftData?.location || shiftData?.shift_location || null;
-
-      if (!locationName) {
-        // Shift ini tidak punya lokasi yang di-set di ERPNext
-        return { success: true, locations: [] };
+      const exactList: any[] = exactRes.data?.data ?? [];
+      if (exactList.length > 0) {
+        const mapped = mapShiftLocation(exactList[0]);
+        if (mapped) {
+          this.cachedShiftLocations.set(shiftName, { data: [mapped], time: now });
+          return { success: true, locations: [mapped] };
+        }
       }
 
-      // Step 2: Resolve koordinat dari doctype Location
-      const locRes = await firstValueFrom(
-        this.httpService.get(
-          `${erpUrl}/api/resource/Location/${encodeURIComponent(locationName)}`,
-          { headers: { Authorization: authHeader } },
-        ).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
+      // ── Step 2: Fallback — ambil semua, cari partial match ────────
+      // Berguna jika nama Shift Location ≠ nama Shift Type secara persis,
+      // misalnya: shift "Shift Pagi A" → Shift Location "Pagi A" atau sebaliknya.
+      const allRes = await firstValueFrom(
+        this.httpService.get(`${erpUrl}/api/resource/Shift Location`, {
+          headers: { Authorization: authHeader },
+          params: {
+            fields:            JSON.stringify(['name', 'latitude', 'longitude', 'checkin_radius']),
+            limit_page_length: 100,
+            _t:                Date.now(),
+          },
+        }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
-      const loc = locRes.data?.data;
+      const allList: any[] = allRes.data?.data ?? [];
+      const shiftLower = shiftName.toLowerCase();
 
-      // Koordinat bisa tersimpan langsung atau dalam GeoJSON point
-      let lat: number | null = null;
-      let lng: number | null = null;
+      // Cari yang namanya paling cocok: prioritaskan yang namanya
+      // mengandung bagian dari shift name, atau sebaliknya.
+      const partialMatch = allList.find((loc: any) => {
+        const locLower = (loc.name as string).toLowerCase();
+        return locLower.includes(shiftLower) || shiftLower.includes(locLower);
+      });
 
-      if (loc?.latitude && loc?.longitude) {
-        lat = parseFloat(loc.latitude);
-        lng = parseFloat(loc.longitude);
-      } else if (loc?.location) {
-        // GeoJSON format: { type: "Point", coordinates: [lng, lat] }
-        try {
-          const geo = typeof loc.location === 'string' ? JSON.parse(loc.location) : loc.location;
-          if (geo?.type === 'Point' && Array.isArray(geo.coordinates)) {
-            lng = geo.coordinates[0];
-            lat = geo.coordinates[1];
-          } else if (geo?.features?.[0]?.geometry?.coordinates) {
-            // FeatureCollection format
-            const coords = geo.features[0].geometry.coordinates;
-            lng = coords[0];
-            lat = coords[1];
-          }
-        } catch { /* tidak bisa parse GeoJSON */ }
+      if (partialMatch) {
+        const mapped = mapShiftLocation(partialMatch);
+        if (mapped) {
+          this.cachedShiftLocations.set(shiftName, { data: [mapped], time: now });
+          return { success: true, locations: [mapped] };
+        }
       }
 
-      if (lat === null || lng === null || isNaN(lat) || isNaN(lng)) {
-        console.warn(`[ShiftLocations] Koordinat tidak ditemukan untuk Location: ${locationName}`);
-        return { success: true, locations: [] };
-      }
-
-      const radius = parseFloat(loc?.geofencing_radius || loc?.radius || '100') || 100;
-
-      const result = [{
-        nama:   loc.location_name || locationName,
-        lat,
-        lng,
-        radius,
-      }];
-
-      this.cachedShiftLocations.set(shiftName, { data: result, time: now });
-      return { success: true, locations: result };
+      // Tidak ditemukan di Shift Location sama sekali
+      console.warn(`[ShiftLocations] Tidak ada Shift Location untuk shift: "${shiftName}"`);
+      this.cachedShiftLocations.set(shiftName, { data: [], time: now });
+      return { success: true, locations: [] };
 
     } catch (error: any) {
       console.error('[getShiftLocations] Error:', error.response?.data || error.message);
-      // Kembalikan array kosong (bukan error) agar frontend bisa fallback
       return { success: true, locations: [] };
     }
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // INVALIDATE SHIFT CACHE (bisa dipanggil dari controller jika perlu)
-  // REVISI: Ditambahkan endpoint baru untuk force-refresh shift list
-  // dari luar (misal oleh HRD setelah menambah shift type baru).
+  // INVALIDATE SHIFT CACHE
   // ─────────────────────────────────────────────────────────────────
   invalidateShiftCache() {
     this.cachedShifts = null;
