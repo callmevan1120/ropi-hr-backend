@@ -42,13 +42,6 @@ export class LocationsController {
     }
   }
 
-  @Get('active-shift')
-async getActiveShift(
-  @Query('employee_id') employeeId: string,
-  @Query('branch') branch?: string,         // ← tambahkan ini
-) {
-  return this.attendanceService.getActiveShift(employeeId, branch);
-}
   @Get()
   async getAllLocations() {
     const locations = await this.fetchLocationsFromERP();
