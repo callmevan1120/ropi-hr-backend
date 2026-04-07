@@ -417,7 +417,7 @@ export class AttendanceService {
       const shiftLocation  = data.shift_location ?? null; 
       const isOutlet       = branch && !this.isOfficeShift(shiftName);
 
-      if (branch) {
+      if (branch && logType === 'IN') {
         if (isOutlet) {
           // 🔥 KUNCI UTAMA: Jika lokasi penugasan kosong, TOLAK ABSENNYA!
           if (!shiftLocation) {
@@ -1133,44 +1133,83 @@ export class AttendanceService {
   // HELPER: Validasi lokasi checkin khusus OUTLET berdasarkan Shift Location
   // ─────────────────────────────────────────────────────────────────
   private async validateOutletLocation(
-    erpUrl: string,
-    authHeader: string,
-    latitude: number,
-    longitude: number,
-    shiftLocation: string,
-  ): Promise<{ valid: boolean; message: string; nearestLocation: string; distance: number }> {
-    if (latitude === undefined || latitude === null || longitude === undefined || longitude === null || (latitude === 0 && longitude === 0)) {
-      return { valid: false, message: 'GPS tidak terdeteksi. Aktifkan lokasi dan coba lagi.', nearestLocation: '', distance: 0 };
-    }
+  erpUrl: string,
+  authHeader: string,
+  latitude: number,
+  longitude: number,
+  shiftLocation: string,
+): Promise<{ valid: boolean; message: string; nearestLocation: string; distance: number }> {
+  // Cek GPS valid
+  if (!latitude || !longitude || (latitude === 0 && longitude === 0)) {
+    return {
+      valid: false,
+      message: 'GPS tidak terdeteksi. Aktifkan lokasi dan coba lagi.',
+      nearestLocation: '',
+      distance: 0,
+    };
+  }
 
-    // Ambil koordinat dari doctype Shift Location di ERPNext
-    const shiftLocs = await this.getBranchLocations(erpUrl, authHeader, shiftLocation);
+  try {
+    // Query EKSAK ke Shift Location berdasarkan nama (bukan fuzzy like)
+    const res = await firstValueFrom(
+      this.httpService.get(
+        `${erpUrl}/api/resource/Shift Location/${encodeURIComponent(shiftLocation)}`,
+        { headers: { Authorization: authHeader } },
+      ).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
+    );
 
-    // 🔥 REVISI UTAMA: Hapus toleransi (fallback). 
-    // Jika HRD belum input koordinat outlet di ERPNext, WAJIB DITOLAK!
-    if (!shiftLocs || shiftLocs.length === 0) {
-      return { 
-        valid: false, 
-        message: `Titik koordinat GPS untuk outlet "${shiftLocation}" belum di-setting oleh HRD di sistem. Harap hubungi HRD!`, 
-        nearestLocation: shiftLocation, 
-        distance: 0 
+    const loc = res.data?.data;
+
+    if (!loc) {
+      return {
+        valid: false,
+        message: `Lokasi outlet "${shiftLocation}" belum terdaftar di sistem. Hubungi HRD!`,
+        nearestLocation: shiftLocation,
+        distance: 0,
       };
     }
 
-    const loc = shiftLocs[0];
-    const dist = this.haversineDistance(latitude, longitude, loc.lat, loc.lng);
+    const lat    = parseFloat(loc.latitude);
+    const lng    = parseFloat(loc.longitude);
+    const radius = parseFloat(loc.checkin_radius || '100') || 100;
 
-    if (dist <= loc.radius) {
-      return { valid: true, message: '', nearestLocation: loc.nama, distance: Math.round(dist) };
+    if (isNaN(lat) || isNaN(lng) || (lat === 0 && lng === 0)) {
+      return {
+        valid: false,
+        message: `Koordinat GPS outlet "${shiftLocation}" belum diisi HRD. Hubungi HRD!`,
+        nearestLocation: shiftLocation,
+        distance: 0,
+      };
+    }
+
+    const dist = this.haversineDistance(latitude, longitude, lat, lng);
+
+    if (dist <= radius) {
+      return {
+        valid: true,
+        message: '',
+        nearestLocation: loc.location_name || loc.name || shiftLocation,
+        distance: Math.round(dist),
+      };
     }
 
     return {
       valid: false,
-      message: `Anda berada ${Math.round(dist)}m dari ${loc.nama}. Maksimum radius adalah ${loc.radius}m.`,
-      nearestLocation: loc.nama,
+      message: `Anda berada ${Math.round(dist)}m dari ${loc.location_name || loc.name}. Maksimum ${radius}m.`,
+      nearestLocation: loc.location_name || loc.name || shiftLocation,
       distance: Math.round(dist),
     };
+
+  } catch {
+    // Shift Location tidak ditemukan sama sekali di ERPNext
+    return {
+      valid: false,
+      message: `Lokasi outlet "${shiftLocation}" tidak ditemukan di sistem. Pastikan HRD sudah input lokasi outlet ini!`,
+      nearestLocation: shiftLocation,
+      distance: 0,
+    };
   }
+}
 
   // ─────────────────────────────────────────────────────────────────
   // HELPER: Parse error ERPNext
