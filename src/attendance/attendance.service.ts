@@ -148,14 +148,13 @@ export class AttendanceService {
 
       if (alreadyExists) return { created: false, docName: null };
 
+      // 1. Buat Shift Assignment dasar DULU (Tanpa Lokasi) agar pasti berhasil
       const createPayload: any = {
         employee:   employeeId,
         shift_type: shiftType,
         start_date: dateStr,
         end_date:   dateStr,
         docstatus:  0,
-        // 🔥 Wajib pakai 'shift_location' (Field bawaan dari doctype Shift Assignment)
-        ...(shiftLocation ? { shift_location: shiftLocation } : {}),
       };
 
       const createRes = await firstValueFrom(
@@ -168,6 +167,43 @@ export class AttendanceService {
 
       const docName: string = createRes.data.data.name;
 
+      // 2. 🔥 SUNTIK PAKSA LOKASI KE DATABASE MENGGUNAKAN set_value
+      if (shiftLocation) {
+        try {
+          await firstValueFrom(
+            this.httpService.post(
+              `${erpUrl}/api/method/frappe.client.set_value`,
+              {
+                doctype:   'Shift Assignment',
+                name:      docName,
+                fieldname: 'shift_location', // Coba tembak nama bawaan
+                value:     shiftLocation,
+              },
+              { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } }
+            )
+          );
+        } catch (e) {
+          // Kalau gagal, berarti namanya custom_shift_location. Tembak lagi!
+          try {
+             await firstValueFrom(
+              this.httpService.post(
+                `${erpUrl}/api/method/frappe.client.set_value`,
+                {
+                  doctype:   'Shift Assignment',
+                  name:      docName,
+                  fieldname: 'custom_shift_location', 
+                  value:     shiftLocation,
+                },
+                { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } }
+              )
+            );
+          } catch (err) {
+            console.warn('[ShiftAssignment] Gagal inject lokasi via set_value');
+          }
+        }
+      }
+
+      // 3. Submit (Ubah docstatus jadi 1)
       await firstValueFrom(
         this.httpService.put(
           `${erpUrl}/api/resource/Shift Assignment/${encodeURIComponent(docName)}`,
