@@ -85,15 +85,11 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // HELPER: Cek apakah Shift Assignment sudah ada untuk hari ini
+  // HELPER: Cek apakah Shift Assignment sudah ada (Ambil Datanya)
   // ─────────────────────────────────────────────────────────────────
-  private async hasExistingShiftAssignment(
-    erpUrl: string,
-    authHeader: string,
-    employeeId: string,
-    shiftType: string,
-    dateStr: string,
-  ): Promise<boolean> {
+  private async getExistingShiftAssignment(
+    erpUrl: string, authHeader: string, employeeId: string, shiftType: string, dateStr: string,
+  ): Promise<any | null> {
     try {
       const res = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Assignment`, {
@@ -103,9 +99,9 @@ export class AttendanceService {
               ['employee',   '=',  employeeId],
               ['shift_type', '=',  shiftType],
               ['start_date', '<=', dateStr],
-              ['docstatus',  'in', [0, 1]],
             ]),
-            fields:            JSON.stringify(['name', 'start_date', 'end_date', 'docstatus']),
+            // 🔥 Tarik juga field lokasinya untuk dicek
+            fields: JSON.stringify(['name', 'start_date', 'end_date', 'docstatus', 'shift_location', 'custom_shift_location']),
             limit_page_length: 50,
             _t: Date.now(),
           },
@@ -121,41 +117,68 @@ export class AttendanceService {
       );
 
       const assignments: any[] = res.data.data ?? [];
-      return assignments.some((a) => {
+      return assignments.find((a) => {
+        if (a.docstatus !== 0 && a.docstatus !== 1) return false;
         if (!a.end_date) return true;
         return a.end_date >= dateStr;
-      });
+      }) || null;
     } catch {
-      return false;
+      return null;
     }
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // CORE: Buat dan Submit Shift Assignment otomatis
+  // CORE: Buat / Update Shift Assignment otomatis
   // ─────────────────────────────────────────────────────────────────
   private async ensureShiftAssignment(
-    erpUrl: string,
-    authHeader: string,
-    employeeId: string,
-    shiftType: string,
-    dateStr: string,
-    shiftLocation?: string | null,
+    erpUrl: string, authHeader: string, employeeId: string, shiftType: string, dateStr: string, shiftLocation?: string | null,
   ): Promise<{ created: boolean; docName: string | null; error?: string }> {
     try {
-      const alreadyExists = await this.hasExistingShiftAssignment(
+      const existing = await this.getExistingShiftAssignment(
         erpUrl, authHeader, employeeId, shiftType, dateStr,
       );
 
-      if (alreadyExists) return { created: false, docName: null };
+      if (existing) {
+        // 🔥 PENYELAMAT: Jika ERPNext bikin Assignment otomatis tapi LOKASINYA KOSONG, kita suntik paksa!
+        if (shiftLocation && !existing.shift_location && !existing.custom_shift_location) {
+          try {
+            await firstValueFrom(
+              this.httpService.post(
+                `${erpUrl}/api/method/frappe.client.set_value`,
+                {
+                  doctype:   'Shift Assignment',
+                  name:      existing.name,
+                  fieldname: 'shift_location', // Tembak ke field bawaan
+                  value:     shiftLocation,
+                },
+                { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } }
+              )
+            );
+            console.log(`[ShiftAssignment] Berhasil menyuntik lokasi ke dokumen kosong buatan ERPNext: ${existing.name}`);
+          } catch (e) {
+            // Fallback (jaga-jaga)
+            try {
+               await firstValueFrom(
+                this.httpService.post(
+                  `${erpUrl}/api/method/frappe.client.set_value`,
+                  { doctype: 'Shift Assignment', name: existing.name, fieldname: 'custom_shift_location', value: shiftLocation },
+                  { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } }
+                )
+              );
+            } catch (err) {}
+          }
+        }
+        return { created: false, docName: existing.name };
+      }
 
+      // Jika belum ada sama sekali, baru kita buatkan dari awal
       const createPayload: any = {
         employee:   employeeId,
         shift_type: shiftType,
         start_date: dateStr,
         end_date:   dateStr,
         docstatus:  0,
-        // 🔥 PASTIKAN INI: Bawa lokasi ke Assignment pakai field bawaan
-        ...(shiftLocation ? { shift_location: shiftLocation } : {}),
+        ...(shiftLocation ? { shift_location: shiftLocation, custom_shift_location: shiftLocation } : {}),
       };
 
       const createRes = await firstValueFrom(
@@ -163,7 +186,7 @@ export class AttendanceService {
           `${erpUrl}/api/resource/Shift Assignment`,
           createPayload,
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ).pipe(retry({ count: 2, delay: (error, retryCount) => timer(retryCount * 1000) }))
+        ).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
       const docName: string = createRes.data.data.name;
@@ -178,9 +201,8 @@ export class AttendanceService {
 
       return { created: true, docName };
     } catch (error: any) {
-      const errMsg = JSON.stringify(error.response?.data || error.message);
-      console.error('[ShiftAssignment] Gagal:', errMsg);
-      return { created: false, docName: null, error: errMsg };
+      console.error('[ShiftAssignment] Gagal:', error.response?.data || error.message);
+      return { created: false, docName: null, error: error.message };
     }
   }
 
