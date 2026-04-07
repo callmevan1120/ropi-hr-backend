@@ -154,7 +154,7 @@ export class AttendanceService {
         start_date: dateStr,
         end_date:   dateStr,
         docstatus:  0,
-        // 🔥 Wajib pakai shift_location karena ini masuk ke Shift Assignment
+        // 🔥 Wajib pakai 'shift_location' (Field bawaan dari doctype Shift Assignment)
         ...(shiftLocation ? { shift_location: shiftLocation } : {}),
       };
 
@@ -214,14 +214,14 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET ACTIVE SHIFT 
+  // GET ACTIVE SHIFT (EFISIEN & ANTI N+1)
   // ─────────────────────────────────────────────────────────────────
   async getActiveShift(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
     const todayStr = this.getTodayWib();
 
     try {
-      // 1. Cek Shift Assignment (Pakai shift_location)
+      // 1. Cek Shift Assignment (Pakai field bawaan: shift_location)
       const assignRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Assignment`, {
           headers: { Authorization: authHeader },
@@ -252,7 +252,7 @@ export class AttendanceService {
         }
       }
 
-      // 2. Cek Shift Request (Pakai custom_shift_location)
+      // 2. Cek Shift Request (Pakai field custom: custom_shift_location)
       const reqRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Request`, {
           headers: { Authorization: authHeader },
@@ -280,7 +280,7 @@ export class AttendanceService {
       if (aktifRequest) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
         if (detail) {
-          // Mapping custom_shift_location jadi shift_location buat PWA
+          // Map ke shift_location agar React gampang bacanya
           return { success: true, source: 'request', shift_location: aktifRequest.custom_shift_location ?? null, ...detail };
         }
       }
@@ -368,7 +368,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // CREATE CHECKIN (HANYA FOTO, TANPA TTD)
+  // CREATE CHECKIN (GEMBOK KETAT)
   // ─────────────────────────────────────────────────────────────────
   async createCheckin(data: any) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -387,15 +387,20 @@ export class AttendanceService {
         shiftName = this.normalizeOfficeShiftName(shiftName);
       }
 
-      // ── VALIDASI LOKASI SERVER-SIDE ──────────────────────────────
-      // Validasi koordinat berlaku untuk MASUK (IN) dan KELUAR (OUT)
       const branch         = data.branch ?? '';
-      const shiftLocation  = data.custom_shift_location ?? null;
+      const shiftLocation  = data.shift_location ?? null; 
       const isOutlet       = branch && !this.isOfficeShift(shiftName);
 
       if (branch) {
-        if (isOutlet && shiftLocation) {
-          // Validasi Outlet menggunakan Shift Location dari pengajuan
+        if (isOutlet) {
+          // 🔥 KUNCI UTAMA: Jika lokasi penugasan kosong, TOLAK ABSENNYA!
+          if (!shiftLocation) {
+            throw new HttpException(
+              { success: false, message: `Data lokasi penugasan kosong. Jadwal shift-mu cacat. Harap hapus jadwal dan ajukan ulang ke HRD!`, error_code: 'MISSING_LOCATION' },
+              HttpStatus.BAD_REQUEST,
+            );
+          }
+
           const locationValidation = await this.validateOutletLocation(
             erpUrl, authHeader, data.latitude, data.longitude, shiftLocation,
           );
@@ -408,7 +413,6 @@ export class AttendanceService {
           }
           console.log(`[Checkin Outlet - ${logType}] ${data.employee_id} di ${locationValidation.nearestLocation} (${locationValidation.distance}m)`);
         } else if (!isOutlet) {
-          // Validasi Kantor menggunakan Profil Branch
           const locationValidation = await this.validateCheckinLocation(
             erpUrl, authHeader, data.employee_id, data.latitude, data.longitude, branch,
           );
@@ -422,14 +426,14 @@ export class AttendanceService {
           console.log(`[Checkin Kantor - ${logType}] ${data.employee_id} di ${locationValidation.nearestLocation} (${locationValidation.distance}m)`);
         }
       }
-      // ──────────────────────────────────────────────────────────────
 
       let shiftAssignmentInfo: { created: boolean; docName: string | null; error?: string } =
         { created: false, docName: null };
 
       if (logType === 'IN' && shiftName) {
         shiftAssignmentInfo = await this.ensureShiftAssignment(
-          erpUrl, authHeader, data.employee_id, shiftName, todayStr, data.custom_shift_location ?? null,
+          erpUrl, authHeader, data.employee_id, shiftName, todayStr, 
+          shiftLocation // 👈 Bawa lokasi ini ke Shift Assignment
         );
       }
 
@@ -459,10 +463,7 @@ export class AttendanceService {
           retry({
             count: 3,
             delay: (error, retryCount) => {
-              if (error.response && error.response.status >= 400 && error.response.status < 500) {
-                return throwError(() => error);
-              }
-              console.warn(`[Auto-Retry] Server ERP sibuk saat proses absen, mencoba ulang ke-${retryCount}...`);
+              if (error.response && error.response.status >= 400 && error.response.status < 500) return throwError(() => error);
               return timer(retryCount * 1500);
             }
           })
@@ -479,10 +480,7 @@ export class AttendanceService {
     } catch (error: any) {
       if (error instanceof HttpException) throw error;
       console.error('Checkin Error:', error.response?.data || error.message);
-      throw new HttpException(
-        'Gagal menyimpan absen ke sistem HR.',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      throw new HttpException('Gagal menyimpan absen ke sistem HR.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -1370,7 +1368,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET SHIFT REQUEST HISTORY
+  // GET SHIFT REQUEST HISTORY (EFISIEN & ANTI N+1)
   // ─────────────────────────────────────────────────────────────────
   async getShiftHistory(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -1380,7 +1378,6 @@ export class AttendanceService {
           headers: { Authorization: authHeader },
           params: {
             filters:           JSON.stringify([['employee', '=', employeeId]]),
-            // 🔥 Ambil data custom_shift_location dari Shift Request
             fields:            JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'from_date', 'to_date', 'status', 'docstatus', 'creation']),
             order_by:          'creation desc',
             limit_page_length: 20,
@@ -1391,7 +1388,6 @@ export class AttendanceService {
       
       const mappedData = (res.data.data ?? []).map((item: any) => ({
         ...item,
-        // Mapping ke shift_location agar React (Frontend) bisa membacanya
         shift_location: item.custom_shift_location ?? null
       }));
 
@@ -1399,50 +1395,6 @@ export class AttendanceService {
     } catch (error: any) {
       console.error('[getShiftHistory] Error:', error.response?.data || error.message);
       return { success: false, data: [], message: 'Gagal mengambil riwayat shift.' };
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────────
-  // CANCEL LEAVE REQUEST
-  // ─────────────────────────────────────────────────────────────────
-  async cancelLeaveRequest(docName: string) {
-    const { erpUrl, authHeader } = this.getAuth();
-
-    try {
-      const checkRes = await firstValueFrom(
-        this.httpService.get(
-          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
-          { headers: { Authorization: authHeader } },
-        ).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
-      );
-      const doc = checkRes.data.data;
-
-      if (doc.docstatus !== 0) {
-        throw new HttpException(
-          'Izin sudah diproses HRD dan tidak bisa dibatalkan.',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-
-      await firstValueFrom(
-        this.httpService.delete(
-          `${erpUrl}/api/resource/Leave Application/${encodeURIComponent(docName)}`,
-          { headers: { Authorization: authHeader } },
-        ).pipe(retry({ count: 3, delay: (_, retryCount) => timer(retryCount * 1500) }))
-      );
-
-      this.invalidateLeaveCache();
-      return { success: true, message: 'Pengajuan izin berhasil dibatalkan.' };
-    } catch (error: any) {
-      if (error instanceof HttpException) throw error;
-      const errMsg = JSON.stringify(error.response?.data || error.message || '');
-      if (errMsg.includes('LinkExistsError') || errMsg.includes('Cannot delete')) {
-        throw new HttpException(
-          'Izin tidak bisa dibatalkan karena sudah terkait data lain.',
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-      throw new HttpException('Gagal membatalkan izin.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
