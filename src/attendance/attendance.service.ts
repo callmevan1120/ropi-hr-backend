@@ -148,7 +148,7 @@ export class AttendanceService {
                 {
                   doctype:   'Shift Assignment',
                   name:      existing.name,
-                  fieldname: 'shift_location',
+                  fieldname: 'shift_location', // Tembak ke field bawaan
                   value:     shiftLocation,
                 },
                 { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } }
@@ -156,10 +156,16 @@ export class AttendanceService {
             );
             console.log(`[ShiftAssignment] Berhasil menyuntik lokasi ke dokumen kosong buatan ERPNext: ${existing.name}`);
           } catch (e) {
-            // BUG FIX: fallback sebelumnya ke custom_shift_location adalah salah —
-            // field itu ada di Shift REQUEST, bukan Shift ASSIGNMENT.
-            // Jika set_value gagal, cukup log warning — jangan throw.
-            console.warn(`[ShiftAssignment] Gagal set shift_location pada ${existing.name}:`, e);
+            // Fallback (jaga-jaga)
+            try {
+               await firstValueFrom(
+                this.httpService.post(
+                  `${erpUrl}/api/method/frappe.client.set_value`,
+                  { doctype: 'Shift Assignment', name: existing.name, fieldname: 'custom_shift_location', value: shiftLocation },
+                  { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } }
+                )
+              );
+            } catch (err) {}
           }
         }
         return { created: false, docName: existing.name };
@@ -265,16 +271,38 @@ export class AttendanceService {
       const requests: any[] = reqRes.data.data ?? [];
       const aktifRequest = requests.find((r) => r.status === 'Approved' && (r.docstatus === 0 || r.docstatus === 1) && (!r.to_date || r.to_date >= todayStr));
 
-      // 3. 🧠 GABUNGKAN LOGIKA (SMART BRIDGE)
+      // 3. GABUNGKAN LOGIKA (SMART BRIDGE)
       if (aktifAssignment || aktifRequest) {
-        // Prioritaskan nama shift dari assignment, fallback ke request
         const shiftType = aktifAssignment?.shift_type || aktifRequest?.shift_type;
-        const source = aktifAssignment ? 'assignment' : 'request';
-        
-        // 🔥 INI KUNCINYA: Jika assignment ada tapi lokasinya KOSONG, pinjam dari Shift Request!
+        const source    = aktifAssignment ? 'assignment' : 'request';
+
+        // Ambil lokasi: prioritas dari Assignment, fallback dari Shift Request
         let finalLocation = aktifAssignment?.shift_location || null;
         if (!finalLocation && aktifRequest?.custom_shift_location) {
-            finalLocation = aktifRequest.custom_shift_location;
+          finalLocation = aktifRequest.custom_shift_location;
+        }
+
+        // PATCH: Jika Assignment ada tapi shift_location-nya kosong,
+        // langsung isi ke ERPNext sekarang via set_value.
+        // Menggantikan peran Server Script (tidak bisa di Frappe Cloud shared bench).
+        // Fire-and-forget agar tidak memperlambat response ke frontend.
+        if (aktifAssignment && !aktifAssignment.shift_location && finalLocation) {
+          firstValueFrom(
+            this.httpService.post(
+              `${erpUrl}/api/method/frappe.client.set_value`,
+              {
+                doctype:   'Shift Assignment',
+                name:      aktifAssignment.name,
+                fieldname: 'shift_location',
+                value:     finalLocation,
+              },
+              { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
+            ).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
+          ).then(() => {
+            console.log(`[getActiveShift] ✓ Patch shift_location="${finalLocation}" → ${aktifAssignment.name}`);
+          }).catch((e: any) => {
+            console.warn(`[getActiveShift] Gagal patch shift_location ke ${aktifAssignment.name}:`, e.message);
+          });
         }
 
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, shiftType);
@@ -987,115 +1015,49 @@ export class AttendanceService {
   // ─────────────────────────────────────────────────────────────────
   // HELPER: Ambil lokasi branch dari ERPNext (Shift Location)
   // ─────────────────────────────────────────────────────────────────
-  // BUG FIX: Filter sebelumnya pakai ['name', 'like', '%branch%'] —
-  // tapi `name` adalah ID dokumen auto-generated ERPNext, bukan nama
-  // lokasi. Yang benar adalah filter ke `location_name`.
-  // Koordinat juga wajib fallback ke field `geolocation` (GeoJSON
-  // FeatureCollection) karena ERPNext sering menyimpan di sana.
-  // ─────────────────────────────────────────────────────────────────
   private async getBranchLocations(
     erpUrl: string,
     authHeader: string,
     branchName: string,
   ): Promise<Array<{ nama: string; lat: number; lng: number; radius: number }>> {
-    const cacheKey = branchName.toLowerCase().trim();
     const now = Date.now();
-    const cached = this.cachedBranchLocations.get(cacheKey);
+    const cached = this.cachedBranchLocations.get(branchName);
     if (cached && (now - cached.time < this.SHIFT_CACHE_TTL)) {
       return cached.data;
     }
 
     try {
-      // Ambil SEMUA Shift Location — filter by name (ID) tidak reliable,
-      // kita cocokkan sendiri by location_name di JS.
+      // Ambil dari doctype Shift Location di ERPNext
       const res = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Location`, {
           headers: { Authorization: authHeader },
           params: {
-            fields: JSON.stringify([
-              'name', 'location_name', 'latitude', 'longitude',
-              'checkin_radius', 'geolocation',
+            filters: JSON.stringify([
+              ['name', 'like', `%${branchName}%`],
             ]),
-            limit_page_length: 200,
+            fields: JSON.stringify(['name', 'latitude', 'longitude', 'checkin_radius']),
+            limit_page_length: 20,
             _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
-      const allLoc: any[] = res.data.data ?? [];
-      const branchLower   = cacheKey;
-
-      // Helper: ekstrak koordinat valid dari record
-      const extractCoords = (loc: any): { lat: number; lng: number } | null => {
-        const lat = Number(loc.latitude);
-        const lng = Number(loc.longitude);
-        // lat/lng 0,0 = belum diisi HRD → skip
-        if (lat && lng && !isNaN(lat) && !isNaN(lng)) return { lat, lng };
-
-        // Fallback ke GeoJSON geolocation (FeatureCollection format ERPNext)
-        if (loc.geolocation) {
-          try {
-            const geo = typeof loc.geolocation === 'string'
-              ? JSON.parse(loc.geolocation)
-              : loc.geolocation;
-            const coords = geo?.features?.[0]?.geometry?.coordinates;
-            if (Array.isArray(coords) && coords.length >= 2) {
-              const gLng = Number(coords[0]);
-              const gLat = Number(coords[1]);
-              if (gLat && gLng && !isNaN(gLat) && !isNaN(gLng)) return { lat: gLat, lng: gLng };
-            }
-          } catch { /* GeoJSON tidak valid */ }
-        }
-        return null;
-      };
-
-      // Cari record yang location_name cocok dengan branchName (3 tier)
-      let matched: any | null = null;
-
-      // Tier 1: exact match
-      matched = allLoc.find(l =>
-        (l.location_name || l.name || '').toLowerCase().trim() === branchLower
-      ) ?? null;
-
-      // Tier 2: location_name mengandung kata kunci dari branch
-      if (!matched) {
-        const words = branchLower.split(/\s+/).filter(w => w.length > 2);
-        matched = allLoc.find(l => {
-          const label = (l.location_name || l.name || '').toLowerCase();
-          return words.some(w => label.includes(w));
-        }) ?? null;
-      }
-
-      // Tier 3: branch mengandung kata dari location_name
-      if (!matched) {
-        matched = allLoc.find(l => {
-          const label = (l.location_name || l.name || '').toLowerCase().trim();
-          const labelWords = label.split(/\s+/).filter(w => w.length > 2);
-          return labelWords.some(w => branchLower.includes(w));
-        }) ?? null;
-      }
-
       const locations: Array<{ nama: string; lat: number; lng: number; radius: number }> = [];
-
-      if (matched) {
-        const coords = extractCoords(matched);
-        if (coords) {
+      for (const loc of res.data.data ?? []) {
+        const lat = parseFloat(loc.latitude);
+        const lng = parseFloat(loc.longitude);
+        const radius = parseFloat(loc.checkin_radius) || 100;
+        if (!isNaN(lat) && !isNaN(lng)) {
           locations.push({
-            nama:   matched.location_name || matched.name,
-            lat:    coords.lat,
-            lng:    coords.lng,
-            radius: Number(matched.checkin_radius) || 100,
+            nama: loc.name,
+            lat,
+            lng,
+            radius,
           });
-          console.log(`[getBranchLocations] ✓ "${branchName}" → "${locations[0].nama}" (${coords.lat}, ${coords.lng}) r=${locations[0].radius}m`);
-        } else {
-          console.warn(`[getBranchLocations] "${matched.location_name}" cocok tapi koordinat 0,0/kosong — belum diisi HRD.`);
         }
-      } else {
-        const available = allLoc.map(l => l.location_name || l.name).join(', ');
-        console.warn(`[getBranchLocations] Tidak ada Shift Location cocok untuk "${branchName}". Tersedia: ${available}`);
       }
 
-      this.cachedBranchLocations.set(cacheKey, { data: locations, time: now });
+      this.cachedBranchLocations.set(branchName, { data: locations, time: now });
       return locations;
     } catch (error: any) {
       console.error(`[getBranchLocations] Error untuk ${branchName}:`, error.response?.data || error.message);
