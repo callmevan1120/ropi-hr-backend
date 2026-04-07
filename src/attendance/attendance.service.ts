@@ -1119,13 +1119,18 @@ export class AttendanceService {
       return { valid: false, message: 'GPS tidak terdeteksi. Aktifkan lokasi dan coba lagi.', nearestLocation: '', distance: 0 };
     }
 
-    // Ambil koordinat dari doctype Location (Shift Location) di ERPNext
-    // Kita panggil getBranchLocations karena fungsinya merequest API yg sama
+    // Ambil koordinat dari doctype Shift Location di ERPNext
     const shiftLocs = await this.getBranchLocations(erpUrl, authHeader, shiftLocation);
 
+    // 🔥 REVISI UTAMA: Hapus toleransi (fallback). 
+    // Jika HRD belum input koordinat outlet di ERPNext, WAJIB DITOLAK!
     if (!shiftLocs || shiftLocs.length === 0) {
-      console.warn(`[OutletValidation] Lokasi "${shiftLocation}" tidak ditemukan koordinatnya di ERPNext. Checkin diizinkan.`);
-      return { valid: true, message: '', nearestLocation: shiftLocation, distance: 0 };
+      return { 
+        valid: false, 
+        message: `Titik koordinat GPS untuk outlet "${shiftLocation}" belum di-setting oleh HRD di sistem. Harap hubungi HRD!`, 
+        nearestLocation: shiftLocation, 
+        distance: 0 
+      };
     }
 
     const loc = shiftLocs[0];
@@ -1137,7 +1142,7 @@ export class AttendanceService {
 
     return {
       valid: false,
-      message: `Anda berada ${Math.round(dist)}m dari ${loc.nama}. Maksimum ${loc.radius}m dari lokasi shift.`,
+      message: `Anda berada ${Math.round(dist)}m dari ${loc.nama}. Maksimum radius adalah ${loc.radius}m.`,
       nearestLocation: loc.nama,
       distance: Math.round(dist),
     };
