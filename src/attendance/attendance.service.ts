@@ -154,7 +154,7 @@ export class AttendanceService {
         start_date: dateStr,
         end_date:   dateStr,
         docstatus:  0,
-        // 🔥 REVISI: Pastikan menggunakan shift_location (bawaan ERPNext)
+        // 🔥 Wajib pakai shift_location karena ini masuk ke Shift Assignment
         ...(shiftLocation ? { shift_location: shiftLocation } : {}),
       };
 
@@ -163,15 +163,7 @@ export class AttendanceService {
           `${erpUrl}/api/resource/Shift Assignment`,
           createPayload,
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ).pipe(
-          retry({
-            count: 2,
-            delay: (error, retryCount) => {
-              if (error.response && error.response.status >= 400 && error.response.status < 500) return throwError(() => error);
-              return timer(retryCount * 1000);
-            }
-          })
-        )
+        ).pipe(retry({ count: 2, delay: (error, retryCount) => timer(retryCount * 1000) }))
       );
 
       const docName: string = createRes.data.data.name;
@@ -181,9 +173,7 @@ export class AttendanceService {
           `${erpUrl}/api/resource/Shift Assignment/${encodeURIComponent(docName)}`,
           { docstatus: 1 },
           { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } },
-        ).pipe(
-          retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) })
-        )
+        ).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
       return { created: true, docName };
@@ -224,14 +214,14 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET ACTIVE SHIFT (SUPER ROBUST)
+  // GET ACTIVE SHIFT 
   // ─────────────────────────────────────────────────────────────────
   async getActiveShift(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
     const todayStr = this.getTodayWib();
 
     try {
-      // 1. Cek Shift Assignment
+      // 1. Cek Shift Assignment (Pakai shift_location)
       const assignRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Assignment`, {
           headers: { Authorization: authHeader },
@@ -258,14 +248,11 @@ export class AttendanceService {
       if (aktifAssignment) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifAssignment.shift_type);
         if (detail) {
-          // Bawaan ERPNext menggunakan shift_location
           return { success: true, source: 'assignment', shift_location: aktifAssignment.shift_location ?? null, ...detail };
-        } else {
-          return { success: false, message: `Detail Master Shift "${aktifAssignment.shift_type}" tidak ditemukan.` };
         }
       }
 
-      // 2. Cek Shift Request
+      // 2. Cek Shift Request (Pakai custom_shift_location)
       const reqRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Request`, {
           headers: { Authorization: authHeader },
@@ -293,10 +280,8 @@ export class AttendanceService {
       if (aktifRequest) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
         if (detail) {
-          // Custom field menggunakan custom_shift_location
+          // Mapping custom_shift_location jadi shift_location buat PWA
           return { success: true, source: 'request', shift_location: aktifRequest.custom_shift_location ?? null, ...detail };
-        } else {
-          return { success: false, message: `Detail jam untuk Shift "${aktifRequest.shift_type}" tidak ditemukan.` };
         }
       }
 
@@ -1360,7 +1345,7 @@ export class AttendanceService {
         docstatus:  0,
       };
 
-      // REVISI: Tambahkan shift_location ke payload jika dikirim dari PWA
+      // 🔥 Wajib pakai custom_shift_location karena ini masuk ke Shift Request
       if (data.shift_location) {
          payload.custom_shift_location = data.shift_location;
       }
@@ -1380,7 +1365,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET SHIFT REQUEST HISTORY (ANTI-ERROR FIELD)
+  // GET SHIFT REQUEST HISTORY
   // ─────────────────────────────────────────────────────────────────
   async getShiftHistory(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -1390,8 +1375,8 @@ export class AttendanceService {
           headers: { Authorization: authHeader },
           params: {
             filters:           JSON.stringify([['employee', '=', employeeId]]),
-            // 🔥 REVISI: Gunakan ["*"] untuk nge-bypass security block ERPNext
-            fields:            JSON.stringify(['*']),
+            // 🔥 Ambil data custom_shift_location dari Shift Request
+            fields:            JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'from_date', 'to_date', 'status', 'docstatus', 'creation']),
             order_by:          'creation desc',
             limit_page_length: 20,
             _t: Date.now(),
@@ -1399,9 +1384,9 @@ export class AttendanceService {
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
       
-      // Map data agar frontend PWA tetap nyaman membacanya
       const mappedData = (res.data.data ?? []).map((item: any) => ({
         ...item,
+        // Mapping ke shift_location agar React (Frontend) bisa membacanya
         shift_location: item.custom_shift_location ?? null
       }));
 
