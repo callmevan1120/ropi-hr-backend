@@ -148,14 +148,14 @@ export class AttendanceService {
 
       if (alreadyExists) return { created: false, docName: null };
 
-      // 1. Buat Shift Assignment dasar DULU (Tanpa Lokasi) agar pasti berhasil
       const createPayload: any = {
         employee:   employeeId,
         shift_type: shiftType,
         start_date: dateStr,
         end_date:   dateStr,
         docstatus:  0,
-        shift_location: shiftLocation,
+        // 🔥 PASTIKAN INI: Bawa lokasi ke Assignment pakai field bawaan
+        ...(shiftLocation ? { shift_location: shiftLocation } : {}),
       };
 
       const createRes = await firstValueFrom(
@@ -168,43 +168,6 @@ export class AttendanceService {
 
       const docName: string = createRes.data.data.name;
 
-      // 2. 🔥 SUNTIK PAKSA LOKASI KE DATABASE MENGGUNAKAN set_value
-      if (shiftLocation) {
-        try {
-          await firstValueFrom(
-            this.httpService.post(
-              `${erpUrl}/api/method/frappe.client.set_value`,
-              {
-                doctype:   'Shift Assignment',
-                name:      docName,
-                fieldname: 'shift_location', // Coba tembak nama bawaan
-                value:     shiftLocation,
-              },
-              { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } }
-            )
-          );
-        } catch (e) {
-          // Kalau gagal, berarti namanya custom_shift_location. Tembak lagi!
-          try {
-             await firstValueFrom(
-              this.httpService.post(
-                `${erpUrl}/api/method/frappe.client.set_value`,
-                {
-                  doctype:   'Shift Assignment',
-                  name:      docName,
-                  fieldname: 'custom_shift_location', 
-                  value:     shiftLocation,
-                },
-                { headers: { Authorization: authHeader, 'Content-Type': 'application/json' } }
-              )
-            );
-          } catch (err) {
-            console.warn('[ShiftAssignment] Gagal inject lokasi via set_value');
-          }
-        }
-      }
-
-      // 3. Submit (Ubah docstatus jadi 1)
       await firstValueFrom(
         this.httpService.put(
           `${erpUrl}/api/resource/Shift Assignment/${encodeURIComponent(docName)}`,
@@ -250,23 +213,21 @@ export class AttendanceService {
     }
   }
 
-  // ─────────────────────────────────────────────────────────────────
-  // GET ACTIVE SHIFT (EFISIEN & ANTI N+1)
+ // ─────────────────────────────────────────────────────────────────
+  // GET ACTIVE SHIFT (CEPAT, AMAN, PASTIKAN IN LIST VIEW CENTANG)
   // ─────────────────────────────────────────────────────────────────
   async getActiveShift(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
     const todayStr = this.getTodayWib();
 
     try {
-      // 1. Cek Shift Assignment (Pakai field bawaan: shift_location)
+      // 1. Cek Shift Assignment
       const assignRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Assignment`, {
           headers: { Authorization: authHeader },
           params: {
-            filters: JSON.stringify([
-              ['employee',   '=',  employeeId],
-              ['start_date', '<=', todayStr],
-            ]),
+            filters: JSON.stringify([['employee', '=', employeeId], ['start_date', '<=', todayStr]]),
+            // Tarik field bawaan shift_location
             fields: JSON.stringify(['name', 'shift_type', 'shift_location', 'start_date', 'end_date', 'docstatus']),
             order_by: 'start_date desc', limit_page_length: 50, _t: Date.now(),
           },
@@ -274,11 +235,7 @@ export class AttendanceService {
       );
 
       const assignments: any[] = assignRes.data.data ?? [];
-      const aktifAssignment = assignments.find((a) => {
-        if (a.docstatus !== 0 && a.docstatus !== 1) return false;
-        if (!a.end_date) return true;
-        return a.end_date >= todayStr;
-      });
+      const aktifAssignment = assignments.find((a) => (a.docstatus === 0 || a.docstatus === 1) && (!a.end_date || a.end_date >= todayStr));
 
       if (aktifAssignment) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifAssignment.shift_type);
@@ -287,39 +244,30 @@ export class AttendanceService {
         }
       }
 
-      // 2. Cek Shift Request (Pakai field custom: custom_shift_location)
+      // 2. Cek Shift Request
       const reqRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Request`, {
           headers: { Authorization: authHeader },
           params: {
-            filters: JSON.stringify([
-              ['employee',  '=',  employeeId],
-              ['from_date', '<=', todayStr],
-            ]),
-            ields: JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'from_date', 'to_date', 'status', 'docstatus']),
+            filters: JSON.stringify([['employee', '=', employeeId], ['from_date', '<=', todayStr]]),
+            // Tarik field custom_shift_location
+            fields: JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'from_date', 'to_date', 'status', 'docstatus']),
             order_by: 'from_date desc', limit_page_length: 50, _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
 
       const requests: any[] = reqRes.data.data ?? [];
-      const aktifRequest = requests.find((r) => {
-        if (r.status !== 'Approved') return false;
-        if (r.docstatus !== 0 && r.docstatus !== 1) return false;
-        if (!r.to_date) return true;
-        return r.to_date >= todayStr;
-      });
+      const aktifRequest = requests.find((r) => r.status === 'Approved' && (r.docstatus === 0 || r.docstatus === 1) && (!r.to_date || r.to_date >= todayStr));
 
       if (aktifRequest) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
         if (detail) {
-          // Map ke shift_location agar React gampang bacanya
           return { success: true, source: 'request', shift_location: aktifRequest.custom_shift_location ?? null, ...detail };
         }
       }
 
       return { success: false, message: 'Belum ada Shift yang di-Approve HRD hari ini.' };
-
     } catch (error: any) {
       console.error('[getActiveShift] Error:', error.response?.data || error.message);
       return { success: false, message: 'Gagal membaca Shift dari ERPNext. Coba lagi.' };
@@ -1381,7 +1329,7 @@ export class AttendanceService {
         docstatus:  0,
       };
 
-      // 🔥 Wajib pakai custom_shift_location karena ini masuk ke Shift Request
+      // 🔥 PASTIKAN INI: Kirim lokasi pakai nama field custom di ERPNext
       if (data.shift_location) {
          payload.custom_shift_location = data.shift_location;
       }
@@ -1396,7 +1344,8 @@ export class AttendanceService {
 
       return { success: true, message: 'Shift Request berhasil diajukan ke HRD.', data: response.data.data };
     } catch (error: any) {
-      throw new HttpException('Gagal mengajukan Shift Request.', HttpStatus.INTERNAL_SERVER_ERROR);
+      console.error('[submitShiftRequest] Error:', error.response?.data || error.message);
+      throw new HttpException('Gagal mengajukan Shift Request. Pastikan lokasi shift terisi.', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 
