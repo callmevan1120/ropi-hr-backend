@@ -148,13 +148,14 @@ export class AttendanceService {
 
       if (alreadyExists) return { created: false, docName: null };
 
-      const createPayload = {
+      const createPayload: any = {
         employee:   employeeId,
         shift_type: shiftType,
         start_date: dateStr,
         end_date:   dateStr,
         docstatus:  0,
-        ...(shiftLocation ? { custom_shift_location: shiftLocation } : {}),
+        // 🔥 REVISI: Pastikan menggunakan shift_location (bawaan ERPNext)
+        ...(shiftLocation ? { shift_location: shiftLocation } : {}),
       };
 
       const createRes = await firstValueFrom(
@@ -223,7 +224,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET ACTIVE SHIFT (SUPER ROBUST & ANTI-ERROR FIELD)
+  // GET ACTIVE SHIFT (SUPER ROBUST)
   // ─────────────────────────────────────────────────────────────────
   async getActiveShift(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -239,8 +240,7 @@ export class AttendanceService {
               ['employee',   '=',  employeeId],
               ['start_date', '<=', todayStr],
             ]),
-            // 🔥 REVISI: Gunakan ["*"] agar ERPNext tidak rewel soal permission field custom
-            fields:            JSON.stringify(['*']),
+            fields:            JSON.stringify(['name', 'shift_type', 'shift_location', 'start_date', 'end_date', 'docstatus']),
             order_by:          'start_date desc',
             limit_page_length: 50,
             _t: Date.now(),
@@ -258,7 +258,8 @@ export class AttendanceService {
       if (aktifAssignment) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifAssignment.shift_type);
         if (detail) {
-          return { success: true, source: 'assignment', shift_location: aktifAssignment.custom_shift_location ?? null, ...detail };
+          // Bawaan ERPNext menggunakan shift_location
+          return { success: true, source: 'assignment', shift_location: aktifAssignment.shift_location ?? null, ...detail };
         } else {
           return { success: false, message: `Detail Master Shift "${aktifAssignment.shift_type}" tidak ditemukan.` };
         }
@@ -273,8 +274,7 @@ export class AttendanceService {
               ['employee',  '=',  employeeId],
               ['from_date', '<=', todayStr],
             ]),
-            // 🔥 REVISI: Gunakan ["*"] agar ERPNext tidak rewel soal permission field custom
-            fields: JSON.stringify(['*']),
+            fields: JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'from_date', 'to_date', 'status', 'docstatus']),
             order_by:          'from_date desc',
             limit_page_length: 50,
             _t: Date.now(),
@@ -293,6 +293,7 @@ export class AttendanceService {
       if (aktifRequest) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
         if (detail) {
+          // Custom field menggunakan custom_shift_location
           return { success: true, source: 'request', shift_location: aktifRequest.custom_shift_location ?? null, ...detail };
         } else {
           return { success: false, message: `Detail jam untuk Shift "${aktifRequest.shift_type}" tidak ditemukan.` };
