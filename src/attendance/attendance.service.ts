@@ -223,7 +223,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET ACTIVE SHIFT (SUPER ROBUST)
+  // GET ACTIVE SHIFT (SUPER ROBUST & ANTI-ERROR FIELD)
   // ─────────────────────────────────────────────────────────────────
   async getActiveShift(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -235,12 +235,12 @@ export class AttendanceService {
         this.httpService.get(`${erpUrl}/api/resource/Shift Assignment`, {
           headers: { Authorization: authHeader },
           params: {
-            // 🔥 REVISI: Filter dilonggarkan agar API ERPNext tidak error
             filters: JSON.stringify([
               ['employee',   '=',  employeeId],
               ['start_date', '<=', todayStr],
             ]),
-            fields:            JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'start_date', 'end_date', 'docstatus']),
+            // 🔥 REVISI: Gunakan ["*"] agar ERPNext tidak rewel soal permission field custom
+            fields:            JSON.stringify(['*']),
             order_by:          'start_date desc',
             limit_page_length: 50,
             _t: Date.now(),
@@ -250,7 +250,6 @@ export class AttendanceService {
 
       const assignments: any[] = assignRes.data.data ?? [];
       const aktifAssignment = assignments.find((a) => {
-        // 🔥 Filter manual di dalam Node.js
         if (a.docstatus !== 0 && a.docstatus !== 1) return false;
         if (!a.end_date) return true;
         return a.end_date >= todayStr;
@@ -270,12 +269,12 @@ export class AttendanceService {
         this.httpService.get(`${erpUrl}/api/resource/Shift Request`, {
           headers: { Authorization: authHeader },
           params: {
-            // 🔥 REVISI: Filter dilonggarkan agar API ERPNext tidak error
             filters: JSON.stringify([
               ['employee',  '=',  employeeId],
               ['from_date', '<=', todayStr],
             ]),
-            fields: JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'from_date', 'to_date', 'status', 'docstatus']),
+            // 🔥 REVISI: Gunakan ["*"] agar ERPNext tidak rewel soal permission field custom
+            fields: JSON.stringify(['*']),
             order_by:          'from_date desc',
             limit_page_length: 50,
             _t: Date.now(),
@@ -285,7 +284,6 @@ export class AttendanceService {
 
       const requests: any[] = reqRes.data.data ?? [];
       const aktifRequest = requests.find((r) => {
-        // 🔥 Filter manual yang kebal error di dalam Node.js
         if (r.status !== 'Approved') return false;
         if (r.docstatus !== 0 && r.docstatus !== 1) return false;
         if (!r.to_date) return true;
@@ -1381,7 +1379,7 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET SHIFT REQUEST HISTORY
+  // GET SHIFT REQUEST HISTORY (ANTI-ERROR FIELD)
   // ─────────────────────────────────────────────────────────────────
   async getShiftHistory(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
@@ -1391,17 +1389,22 @@ export class AttendanceService {
           headers: { Authorization: authHeader },
           params: {
             filters:           JSON.stringify([['employee', '=', employeeId]]),
-            fields:            JSON.stringify([
-              'name', 'shift_type', 'custom_shift_location', 'from_date', 'to_date',
-              'status', 'docstatus', 'creation',
-            ]),
+            // 🔥 REVISI: Gunakan ["*"] untuk nge-bypass security block ERPNext
+            fields:            JSON.stringify(['*']),
             order_by:          'creation desc',
             limit_page_length: 20,
             _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
-      return { success: true, data: res.data.data ?? [] };
+      
+      // Map data agar frontend PWA tetap nyaman membacanya
+      const mappedData = (res.data.data ?? []).map((item: any) => ({
+        ...item,
+        shift_location: item.custom_shift_location ?? null
+      }));
+
+      return { success: true, data: mappedData };
     } catch (error: any) {
       console.error('[getShiftHistory] Error:', error.response?.data || error.message);
       return { success: false, data: [], message: 'Gagal mengambil riwayat shift.' };
