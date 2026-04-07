@@ -155,6 +155,7 @@ export class AttendanceService {
         start_date: dateStr,
         end_date:   dateStr,
         docstatus:  0,
+        shift_location: shiftLocation,
       };
 
       const createRes = await firstValueFrom(
@@ -266,10 +267,8 @@ export class AttendanceService {
               ['employee',   '=',  employeeId],
               ['start_date', '<=', todayStr],
             ]),
-            fields:            JSON.stringify(['name', 'shift_type', 'shift_location', 'start_date', 'end_date', 'docstatus']),
-            order_by:          'start_date desc',
-            limit_page_length: 50,
-            _t: Date.now(),
+            fields: JSON.stringify(['name', 'shift_type', 'shift_location', 'start_date', 'end_date', 'docstatus']),
+            order_by: 'start_date desc', limit_page_length: 50, _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
@@ -297,10 +296,8 @@ export class AttendanceService {
               ['employee',  '=',  employeeId],
               ['from_date', '<=', todayStr],
             ]),
-            fields: JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'from_date', 'to_date', 'status', 'docstatus']),
-            order_by:          'from_date desc',
-            limit_page_length: 50,
-            _t: Date.now(),
+            ields: JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'from_date', 'to_date', 'status', 'docstatus']),
+            order_by: 'from_date desc', limit_page_length: 50, _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
@@ -696,9 +693,9 @@ export class AttendanceService {
           params: {
             fields:            JSON.stringify(['name', 'start_time', 'end_time', 'color']),
             order_by:          'name asc',
-            // REVISI: Naikkan limit agar shift type baru tidak terpotong.
-            // Nilai 200 lebih dari cukup untuk kebanyakan setup ERPNext.
-            limit_page_length: 200,
+            // REVISI: Gunakan limit_page_length DAN limit (beberapa versi ERPNext butuh keduanya)
+            limit_page_length: 100,
+            limit:             100,
             _t: Date.now(), // cache-busting agar ERPNext tidak serve stale response
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
