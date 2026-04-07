@@ -237,7 +237,7 @@ export class AttendanceService {
             filters: JSON.stringify([
               ['employee',   '=',  employeeId],
               ['start_date', '<=', todayStr],
-              ['docstatus',  '=',  [0, 1]],
+              ['docstatus',  'in', [0, 1]],
             ]),
             fields:            JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'start_date', 'end_date']),
             order_by:          'start_date desc',
@@ -266,7 +266,7 @@ export class AttendanceService {
               ['employee',  '=',  employeeId],
               ['from_date', '<=', todayStr],
               ['status',    '=',  'Approved'],
-              ['docstatus', '=',  [0, 1]],
+              ['docstatus',  'in', [0, 1]],
             ]),
             fields: JSON.stringify(['name', 'shift_type', 'from_date', 'to_date', 'custom_shift_location']),
             order_by:          'from_date desc',
