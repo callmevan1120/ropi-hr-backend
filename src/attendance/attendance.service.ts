@@ -236,60 +236,61 @@ export class AttendanceService {
   }
 
  // ─────────────────────────────────────────────────────────────────
-  // GET ACTIVE SHIFT (CEPAT, AMAN, PASTIKAN IN LIST VIEW CENTANG)
+  // GET ACTIVE SHIFT (SMART BRIDGE)
   // ─────────────────────────────────────────────────────────────────
   async getActiveShift(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
     const todayStr = this.getTodayWib();
 
     try {
-      // 1. Cek Shift Assignment
+      // 1. Tarik Shift Assignment hari ini
       const assignRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Assignment`, {
           headers: { Authorization: authHeader },
           params: {
             filters: JSON.stringify([['employee', '=', employeeId], ['start_date', '<=', todayStr]]),
-            // Tarik field bawaan shift_location
             fields: JSON.stringify(['name', 'shift_type', 'shift_location', 'start_date', 'end_date', 'docstatus']),
             order_by: 'start_date desc', limit_page_length: 50, _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
-
       const assignments: any[] = assignRes.data.data ?? [];
       const aktifAssignment = assignments.find((a) => (a.docstatus === 0 || a.docstatus === 1) && (!a.end_date || a.end_date >= todayStr));
 
-      if (aktifAssignment) {
-        const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifAssignment.shift_type);
-        if (detail) {
-          return { success: true, source: 'assignment', shift_location: aktifAssignment.shift_location ?? null, ...detail };
-        }
-      }
-
-      // 2. Cek Shift Request
+      // 2. Tarik Shift Request hari ini
       const reqRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Request`, {
           headers: { Authorization: authHeader },
           params: {
             filters: JSON.stringify([['employee', '=', employeeId], ['from_date', '<=', todayStr]]),
-            // Tarik field custom_shift_location
             fields: JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'from_date', 'to_date', 'status', 'docstatus']),
             order_by: 'from_date desc', limit_page_length: 50, _t: Date.now(),
           },
         }).pipe(retry({ count: 2, delay: (_, retryCount) => timer(retryCount * 1000) }))
       );
-
       const requests: any[] = reqRes.data.data ?? [];
       const aktifRequest = requests.find((r) => r.status === 'Approved' && (r.docstatus === 0 || r.docstatus === 1) && (!r.to_date || r.to_date >= todayStr));
 
-      if (aktifRequest) {
-        const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
+      // 3. 🧠 GABUNGKAN LOGIKA (SMART BRIDGE)
+      if (aktifAssignment || aktifRequest) {
+        // Prioritaskan nama shift dari assignment, fallback ke request
+        const shiftType = aktifAssignment?.shift_type || aktifRequest?.shift_type;
+        const source = aktifAssignment ? 'assignment' : 'request';
+        
+        // 🔥 INI KUNCINYA: Jika assignment ada tapi lokasinya KOSONG, pinjam dari Shift Request!
+        let finalLocation = aktifAssignment?.shift_location || null;
+        if (!finalLocation && aktifRequest?.custom_shift_location) {
+            finalLocation = aktifRequest.custom_shift_location;
+        }
+
+        const detail = await this.getShiftTypeDetail(erpUrl, authHeader, shiftType);
         if (detail) {
-          return { success: true, source: 'request', shift_location: aktifRequest.custom_shift_location ?? null, ...detail };
+          return { success: true, source, shift_location: finalLocation, ...detail };
         }
       }
 
       return { success: false, message: 'Belum ada Shift yang di-Approve HRD hari ini.' };
+
     } catch (error: any) {
       console.error('[getActiveShift] Error:', error.response?.data || error.message);
       return { success: false, message: 'Gagal membaca Shift dari ERPNext. Coba lagi.' };
