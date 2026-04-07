@@ -1336,8 +1336,8 @@ export class AttendanceService {
     const { erpUrl, authHeader } = this.getAuth();
 
     try {
-      const payload = {
-        employee:  data.employee_id,
+      const payload: any = {
+        employee:   data.employee_id,
         shift_type: data.shift_type,
         from_date:  data.from_date,
         to_date:    data.to_date,
@@ -1345,6 +1345,11 @@ export class AttendanceService {
         status:     'Draft',
         docstatus:  0,
       };
+
+      // REVISI: Tambahkan shift_location ke payload jika dikirim dari PWA
+      if (data.shift_location) {
+         payload.shift_location = data.shift_location;
+      }
 
       const response = await firstValueFrom(
         this.httpService.post(
@@ -1372,7 +1377,7 @@ export class AttendanceService {
           params: {
             filters:           JSON.stringify([['employee', '=', employeeId]]),
             fields:            JSON.stringify([
-              'name', 'shift_type', 'from_date', 'to_date',
+              'name', 'shift_type', 'shift_location', 'from_date', 'to_date',
               'status', 'docstatus', 'creation',
             ]),
             order_by:          'creation desc',
