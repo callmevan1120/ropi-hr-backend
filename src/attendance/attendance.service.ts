@@ -154,7 +154,7 @@ export class AttendanceService {
         start_date: dateStr,
         end_date:   dateStr,
         docstatus:  0,
-        ...(shiftLocation ? { shift_location: shiftLocation } : {}),
+        ...(shiftLocation ? { custom_shift_location: shiftLocation } : {}),
       };
 
       const createRes = await firstValueFrom(
@@ -239,7 +239,7 @@ export class AttendanceService {
               ['start_date', '<=', todayStr],
               ['docstatus',  '=',  1],
             ]),
-            fields:            JSON.stringify(['name', 'shift_type', 'start_date', 'end_date']),
+            fields:            JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'start_date', 'end_date']),
             order_by:          'start_date desc',
             limit_page_length: 50,
             _t: Date.now(),
@@ -255,7 +255,7 @@ export class AttendanceService {
 
       if (aktifAssignment) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifAssignment.shift_type);
-        if (detail) return { success: true, source: 'assignment', ...detail };
+        if (detail) return { success: true, source: 'assignment', shift_location: aktifAssignment.custom_shift_location ?? null, ...detail };
       }
 
       const reqRes = await firstValueFrom(
@@ -268,7 +268,7 @@ export class AttendanceService {
               ['status',    '=',  'Approved'],
               ['docstatus', '=',  1],
             ]),
-            fields: JSON.stringify(['name', 'shift_type', 'from_date', 'to_date', 'shift_location']),
+            fields: JSON.stringify(['name', 'shift_type', 'from_date', 'to_date', 'custom_shift_location']),
             order_by:          'from_date desc',
             limit_page_length: 50,
             _t: Date.now(),
@@ -284,7 +284,8 @@ export class AttendanceService {
 
       if (aktifRequest) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
-        if (detail) return { success: true, source: 'request', ...detail, shift_location: aktifRequest.shift_location ?? null, };
+        if (detail) return { success: true, source: 'request', ...detail, 
+          shift_location: aktifRequest.custom_shift_location ?? null, };
       }
 
       return { success: false, message: 'Belum ada Shift. Silakan Ajukan Shift ke HRD.' };
@@ -391,7 +392,7 @@ export class AttendanceService {
       // ── VALIDASI LOKASI SERVER-SIDE ──────────────────────────────
       // Validasi koordinat berlaku untuk MASUK (IN) dan KELUAR (OUT)
       const branch         = data.branch ?? '';
-      const shiftLocation  = data.shift_location ?? null;
+      const shiftLocation  = data.custom_shift_location ?? null;
       const isOutlet       = branch && !this.isOfficeShift(shiftName);
 
       if (branch) {
@@ -430,7 +431,7 @@ export class AttendanceService {
 
       if (logType === 'IN' && shiftName) {
         shiftAssignmentInfo = await this.ensureShiftAssignment(
-          erpUrl, authHeader, data.employee_id, shiftName, todayStr, data.shift_location ?? null,
+          erpUrl, authHeader, data.employee_id, shiftName, todayStr, data.custom_shift_location ?? null,
         );
       }
 
@@ -712,7 +713,7 @@ export class AttendanceService {
       // ERPNext Shift Type menyimpan lokasi di field `location`
       // (bisa berupa string nama Location atau array child table)
       const locationName: string | null =
-        shiftData?.location || shiftData?.shift_location || null;
+        shiftData?.location || shiftData?.custom_shift_location || null;
 
       if (!locationName) {
         // Shift ini tidak punya lokasi yang di-set di ERPNext
@@ -1348,7 +1349,7 @@ export class AttendanceService {
 
       // REVISI: Tambahkan shift_location ke payload jika dikirim dari PWA
       if (data.shift_location) {
-         payload.shift_location = data.shift_location;
+         payload.custom_shift_location = data.shift_location;
       }
 
       const response = await firstValueFrom(
@@ -1377,7 +1378,7 @@ export class AttendanceService {
           params: {
             filters:           JSON.stringify([['employee', '=', employeeId]]),
             fields:            JSON.stringify([
-              'name', 'shift_type', 'shift_location', 'from_date', 'to_date',
+              'name', 'shift_type', 'custom_shift_location', 'from_date', 'to_date',
               'status', 'docstatus', 'creation',
             ]),
             order_by:          'creation desc',
