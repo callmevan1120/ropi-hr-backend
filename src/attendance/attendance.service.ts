@@ -223,23 +223,24 @@ export class AttendanceService {
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // GET ACTIVE SHIFT
+  // GET ACTIVE SHIFT (SUPER ROBUST)
   // ─────────────────────────────────────────────────────────────────
   async getActiveShift(employeeId: string) {
     const { erpUrl, authHeader } = this.getAuth();
     const todayStr = this.getTodayWib();
 
     try {
+      // 1. Cek Shift Assignment
       const assignRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Assignment`, {
           headers: { Authorization: authHeader },
           params: {
+            // 🔥 REVISI: Filter dilonggarkan agar API ERPNext tidak error
             filters: JSON.stringify([
               ['employee',   '=',  employeeId],
               ['start_date', '<=', todayStr],
-              ['docstatus',  'in', [0, 1]],
             ]),
-            fields:            JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'start_date', 'end_date']),
+            fields:            JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'start_date', 'end_date', 'docstatus']),
             order_by:          'start_date desc',
             limit_page_length: 50,
             _t: Date.now(),
@@ -249,26 +250,32 @@ export class AttendanceService {
 
       const assignments: any[] = assignRes.data.data ?? [];
       const aktifAssignment = assignments.find((a) => {
+        // 🔥 Filter manual di dalam Node.js
+        if (a.docstatus !== 0 && a.docstatus !== 1) return false;
         if (!a.end_date) return true;
         return a.end_date >= todayStr;
       });
 
       if (aktifAssignment) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifAssignment.shift_type);
-        if (detail) return { success: true, source: 'assignment', shift_location: aktifAssignment.custom_shift_location ?? null, ...detail };
+        if (detail) {
+          return { success: true, source: 'assignment', shift_location: aktifAssignment.custom_shift_location ?? null, ...detail };
+        } else {
+          return { success: false, message: `Detail Master Shift "${aktifAssignment.shift_type}" tidak ditemukan.` };
+        }
       }
 
+      // 2. Cek Shift Request
       const reqRes = await firstValueFrom(
         this.httpService.get(`${erpUrl}/api/resource/Shift Request`, {
           headers: { Authorization: authHeader },
           params: {
+            // 🔥 REVISI: Filter dilonggarkan agar API ERPNext tidak error
             filters: JSON.stringify([
               ['employee',  '=',  employeeId],
               ['from_date', '<=', todayStr],
-              ['status',    '=',  'Approved'],
-              ['docstatus',  'in', [0, 1]],
             ]),
-            fields: JSON.stringify(['name', 'shift_type', 'from_date', 'to_date', 'custom_shift_location']),
+            fields: JSON.stringify(['name', 'shift_type', 'custom_shift_location', 'from_date', 'to_date', 'status', 'docstatus']),
             order_by:          'from_date desc',
             limit_page_length: 50,
             _t: Date.now(),
@@ -278,20 +285,27 @@ export class AttendanceService {
 
       const requests: any[] = reqRes.data.data ?? [];
       const aktifRequest = requests.find((r) => {
+        // 🔥 Filter manual yang kebal error di dalam Node.js
+        if (r.status !== 'Approved') return false;
+        if (r.docstatus !== 0 && r.docstatus !== 1) return false;
         if (!r.to_date) return true;
         return r.to_date >= todayStr;
       });
 
       if (aktifRequest) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
-        if (detail) return { success: true, source: 'request', ...detail, 
-          shift_location: aktifRequest.custom_shift_location ?? null, };
+        if (detail) {
+          return { success: true, source: 'request', shift_location: aktifRequest.custom_shift_location ?? null, ...detail };
+        } else {
+          return { success: false, message: `Detail jam untuk Shift "${aktifRequest.shift_type}" tidak ditemukan.` };
+        }
       }
 
-      return { success: false, message: 'Belum ada Shift. Silakan Ajukan Shift ke HRD.' };
+      return { success: false, message: 'Belum ada Shift yang di-Approve HRD hari ini.' };
 
     } catch (error: any) {
-      return { success: false, message: 'Gagal membaca Shift dari ERPNext.' };
+      console.error('[getActiveShift] Error:', error.response?.data || error.message);
+      return { success: false, message: 'Gagal membaca Shift dari ERPNext. Coba lagi.' };
     }
   }
 
