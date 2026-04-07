@@ -139,6 +139,7 @@ export class AttendanceService {
     employeeId: string,
     shiftType: string,
     dateStr: string,
+    shiftLocation?: string | null,
   ): Promise<{ created: boolean; docName: string | null; error?: string }> {
     try {
       const alreadyExists = await this.hasExistingShiftAssignment(
@@ -153,6 +154,7 @@ export class AttendanceService {
         start_date: dateStr,
         end_date:   dateStr,
         docstatus:  0,
+        ...(shiftLocation ? { shift_location: shiftLocation } : {}),
       };
 
       const createRes = await firstValueFrom(
@@ -266,7 +268,7 @@ export class AttendanceService {
               ['status',    '=',  'Approved'],
               ['docstatus', '=',  1],
             ]),
-            fields:            JSON.stringify(['name', 'shift_type', 'from_date', 'to_date']),
+            fields: JSON.stringify(['name', 'shift_type', 'from_date', 'to_date', 'shift_location']),
             order_by:          'from_date desc',
             limit_page_length: 50,
             _t: Date.now(),
@@ -282,7 +284,7 @@ export class AttendanceService {
 
       if (aktifRequest) {
         const detail = await this.getShiftTypeDetail(erpUrl, authHeader, aktifRequest.shift_type);
-        if (detail) return { success: true, source: 'request', ...detail };
+        if (detail) return { success: true, source: 'request', ...detail, shift_location: aktifRequest.shift_location ?? null, };
       }
 
       return { success: false, message: 'Belum ada Shift. Silakan Ajukan Shift ke HRD.' };
@@ -387,32 +389,39 @@ export class AttendanceService {
       }
 
       // ── VALIDASI LOKASI SERVER-SIDE ──────────────────────────────
-      // Validasi bahwa koordinat checkin berada dalam radius branch karyawan
-      // Hanya untuk checkin MASUK (IN), bukan untuk checkout (OUT)
-      const branch = data.branch ?? '';
-      if (logType === 'IN' && branch) {
-        const locationValidation = await this.validateCheckinLocation(
-          erpUrl,
-          authHeader,
-          data.employee_id,
-          data.latitude,
-          data.longitude,
-          branch,
-        );
+      // Validasi koordinat berlaku untuk MASUK (IN) dan KELUAR (OUT)
+      const branch         = data.branch ?? '';
+      const shiftLocation  = data.shift_location ?? null;
+      const isOutlet       = branch && !this.isOfficeShift(shiftName);
 
-        if (!locationValidation.valid) {
-          throw new HttpException(
-            {
-              success: false,
-              message: `Lokasi tidak valid: ${locationValidation.message}`,
-              error_code: 'INVALID_LOCATION',
-            },
-            HttpStatus.BAD_REQUEST,
+      if (branch) {
+        if (isOutlet && shiftLocation) {
+          // Validasi Outlet menggunakan Shift Location dari pengajuan
+          const locationValidation = await this.validateOutletLocation(
+            erpUrl, authHeader, data.latitude, data.longitude, shiftLocation,
           );
-        }
 
-        // Log valid location untuk audit trail
-        console.log(`[Checkin] Employee ${data.employee_id} di ${locationValidation.nearestLocation} (${locationValidation.distance}m dari branch)`);
+          if (!locationValidation.valid) {
+            throw new HttpException(
+              { success: false, message: `Lokasi tidak valid: ${locationValidation.message}`, error_code: 'INVALID_LOCATION' },
+              HttpStatus.BAD_REQUEST,
+            );
+          }
+          console.log(`[Checkin Outlet - ${logType}] ${data.employee_id} di ${locationValidation.nearestLocation} (${locationValidation.distance}m)`);
+        } else if (!isOutlet) {
+          // Validasi Kantor menggunakan Profil Branch
+          const locationValidation = await this.validateCheckinLocation(
+            erpUrl, authHeader, data.employee_id, data.latitude, data.longitude, branch,
+          );
+
+          if (!locationValidation.valid) {
+            throw new HttpException(
+              { success: false, message: `Lokasi tidak valid: ${locationValidation.message}`, error_code: 'INVALID_LOCATION' },
+              HttpStatus.BAD_REQUEST,
+            );
+          }
+          console.log(`[Checkin Kantor - ${logType}] ${data.employee_id} di ${locationValidation.nearestLocation} (${locationValidation.distance}m)`);
+        }
       }
       // ──────────────────────────────────────────────────────────────
 
@@ -421,7 +430,7 @@ export class AttendanceService {
 
       if (logType === 'IN' && shiftName) {
         shiftAssignmentInfo = await this.ensureShiftAssignment(
-          erpUrl, authHeader, data.employee_id, shiftName, todayStr,
+          erpUrl, authHeader, data.employee_id, shiftName, todayStr, data.shift_location ?? null,
         );
       }
 
@@ -1094,6 +1103,44 @@ export class AttendanceService {
       message: `Anda berada ${Math.round(minDistance)}m dari ${nearestLocation.nama}. Maksimum ${allowedRadius}m dari lokasi branch.`,
       nearestLocation: nearestLocation.nama,
       distance: Math.round(minDistance),
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // HELPER: Validasi lokasi checkin khusus OUTLET berdasarkan Shift Location
+  // ─────────────────────────────────────────────────────────────────
+  private async validateOutletLocation(
+    erpUrl: string,
+    authHeader: string,
+    latitude: number,
+    longitude: number,
+    shiftLocation: string,
+  ): Promise<{ valid: boolean; message: string; nearestLocation: string; distance: number }> {
+    if (latitude === undefined || latitude === null || longitude === undefined || longitude === null || (latitude === 0 && longitude === 0)) {
+      return { valid: false, message: 'GPS tidak terdeteksi. Aktifkan lokasi dan coba lagi.', nearestLocation: '', distance: 0 };
+    }
+
+    // Ambil koordinat dari doctype Location (Shift Location) di ERPNext
+    // Kita panggil getBranchLocations karena fungsinya merequest API yg sama
+    const shiftLocs = await this.getBranchLocations(erpUrl, authHeader, shiftLocation);
+
+    if (!shiftLocs || shiftLocs.length === 0) {
+      console.warn(`[OutletValidation] Lokasi "${shiftLocation}" tidak ditemukan koordinatnya di ERPNext. Checkin diizinkan.`);
+      return { valid: true, message: '', nearestLocation: shiftLocation, distance: 0 };
+    }
+
+    const loc = shiftLocs[0];
+    const dist = this.haversineDistance(latitude, longitude, loc.lat, loc.lng);
+
+    if (dist <= loc.radius) {
+      return { valid: true, message: '', nearestLocation: loc.nama, distance: Math.round(dist) };
+    }
+
+    return {
+      valid: false,
+      message: `Anda berada ${Math.round(dist)}m dari ${loc.nama}. Maksimum ${loc.radius}m dari lokasi shift.`,
+      nearestLocation: loc.nama,
+      distance: Math.round(dist),
     };
   }
 
